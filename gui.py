@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Video2Doc GUI - Graphical User Interface for Video2Doc
+FrameNotes GUI - Graphical User Interface for FrameNotes
 A Tkinter-based interface for converting videos to documentation.
 """
 
@@ -16,7 +16,7 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# Import Video2Doc modules
+# Import FrameNotes modules
 from transcriber import transcribe, get_full_transcript
 from analyzer import analyze_transcript, get_screenshot_points
 from screenshotter import capture_screenshots, get_video_duration
@@ -24,12 +24,12 @@ from generators import generate_docx, generate_pptx, generate_markdown
 from generators.markdown_gen import generate_markdown_with_transcript
 
 
-class Video2DocApp:
-    """Main application class for Video2Doc GUI"""
+class FrameNotesApp:
+    """Main application class for FrameNotes GUI"""
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Video2Doc - AI Documentation Generator")
+        self.root.title("FrameNotes - AI Documentation Generator")
         self.root.geometry("550x580")
         self.root.minsize(500, 550)
 
@@ -78,7 +78,7 @@ class Video2DocApp:
         # === Header ===
         header = ttk.Label(
             main_frame,
-            text="Video2Doc - AI Documentation Generator",
+            text="FrameNotes - AI Documentation Generator",
             style="Header.TLabel"
         )
         header.pack(pady=(0, 15))
@@ -221,7 +221,7 @@ class Video2DocApp:
         # Version label
         version_label = ttk.Label(
             main_frame,
-            text="Video2Doc v1.0 - Powered by Claude AI",
+            text="FrameNotes v1.0 - Powered by Claude AI",
             style="Status.TLabel"
         )
         version_label.pack(side=tk.BOTTOM, pady=(10, 0))
@@ -364,7 +364,7 @@ class Video2DocApp:
         output_dir = Path(self.output_dir.get())
         video_name = Path(video_path).stem
 
-        temp_dir = tempfile.mkdtemp(prefix="video2doc_gui_")
+        temp_dir = tempfile.mkdtemp(prefix="framenotes_gui_")
         screenshots_dir = Path(temp_dir) / "screenshots"
         screenshots_dir.mkdir(parents=True, exist_ok=True)
 
@@ -568,7 +568,7 @@ def main():
     except Exception:
         pass
 
-    app = Video2DocApp(root)
+    app = FrameNotesApp(root)
     root.mainloop()
 
 

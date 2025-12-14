@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Video2Doc - AI-Powered Video to Documentation Generator
+FrameNotes - AI-Powered Video to Documentation Generator
 
 Transforms video content into professional documentation with:
 - Automatic transcription with timestamps
@@ -34,7 +34,7 @@ from generators.markdown_gen import generate_markdown_with_transcript
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
-        description="Video2Doc - Transform videos into professional documentation",
+        description="FrameNotes - Transform videos into professional documentation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -153,7 +153,7 @@ def main():
     args = parse_args()
 
     print("=" * 60)
-    print("Video2Doc - AI-Powered Documentation Generator")
+    print("FrameNotes - AI-Powered Documentation Generator")
     print("=" * 60)
     print()
 
@@ -164,7 +164,7 @@ def main():
     api_key = os.environ.get("ANTHROPIC_API_KEY")
 
     # Create temp directory for screenshots
-    temp_dir = args.temp_dir or tempfile.mkdtemp(prefix="video2doc_")
+    temp_dir = args.temp_dir or tempfile.mkdtemp(prefix="framenotes_")
     screenshots_dir = Path(temp_dir) / "screenshots"
     screenshots_dir.mkdir(parents=True, exist_ok=True)
 

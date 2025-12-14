@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Video2Doc GUI v2.0 - Modern CustomTkinter Interface
+FrameNotes GUI v2.0 - Modern CustomTkinter Interface
 Features: Dark mode, auto-detection, advanced options, chunked processing support
 Settings: Tabbed settings window with tooltips and help documentation
 """
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
-# Import Video2Doc modules (v2 with chunking and hierarchical analysis)
+# Import FrameNotes modules (v2 with chunking and hierarchical analysis)
 from transcriber_v2 import ChunkedTranscriber, transcribe, get_full_transcript
 from analyzer_v2 import HierarchicalAnalyzer, analyze_transcript, get_screenshot_points
 from screenshotter import capture_screenshots, get_video_duration
@@ -569,10 +569,10 @@ class SettingsWindow(ctk.CTkToplevel):
 
         # Insert documentation
         documentation = """
-VIDEO2DOC - AI-Powered Documentation Generator
+FRAMENOTES - AI-Powered Video Documentation
 ================================================
 
-Video2Doc automatically converts video tutorials and presentations into
+FrameNotes automatically converts video tutorials and presentations into
 professional documentation using AI transcription and analysis.
 
 
@@ -667,8 +667,8 @@ Poor transcription quality:
 
 SUPPORT
 -------
-Report issues: https://github.com/your-repo/video2doc/issues
-Documentation: https://github.com/your-repo/video2doc/wiki
+Report issues: https://github.com/your-repo/framenotes/issues
+Documentation: https://github.com/your-repo/framenotes/wiki
 
 Version: """ + APP_VERSION + """
 Powered by Whisper AI and Claude AI
@@ -803,8 +803,8 @@ Powered by Whisper AI and Claude AI
             self._load_settings()
 
 
-class Video2DocApp(ctk.CTk):
-    """Main application class for Video2Doc GUI v2.0"""
+class FrameNotesApp(ctk.CTk):
+    """Main application class for FrameNotes GUI v2.0"""
 
     def __init__(self):
         super().__init__()
@@ -899,7 +899,7 @@ class Video2DocApp(ctk.CTk):
 
         title_label = ctk.CTkLabel(
             header_frame,
-            text="Video2Doc",
+            text="FrameNotes",
             font=ctk.CTkFont(size=28, weight="bold")
         )
         title_label.grid(row=0, column=0, sticky="w")
@@ -1236,7 +1236,7 @@ class Video2DocApp(ctk.CTk):
         # Version label
         version_label = ctk.CTkLabel(
             self.main_frame,
-            text=f"Video2Doc v{APP_VERSION} - Powered by Claude AI",
+            text=f"FrameNotes v{APP_VERSION} - Powered by Claude AI",
             font=ctk.CTkFont(size=11),
             text_color="gray"
         )
@@ -1548,7 +1548,7 @@ class Video2DocApp(ctk.CTk):
         output_dir = Path(snapshot.output_dir)
         video_name = Path(video_path).stem
 
-        temp_dir = tempfile.mkdtemp(prefix="video2doc_gui_")
+        temp_dir = tempfile.mkdtemp(prefix="framenotes_gui_")
         screenshots_dir = Path(temp_dir) / "screenshots"
         screenshots_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1796,7 +1796,7 @@ class Video2DocApp(ctk.CTk):
 
 def main():
     """Main entry point for GUI"""
-    app = Video2DocApp()
+    app = FrameNotesApp()
     app.mainloop()
 
 

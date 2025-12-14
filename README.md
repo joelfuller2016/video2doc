@@ -1,4 +1,4 @@
-# Video2Doc
+# FrameNotes
 
 AI-powered tool that transforms video content into professional documentation with automatic transcription, intelligent screenshot placement, and multiple output formats.
 
@@ -45,7 +45,7 @@ sudo apt update && sudo apt install ffmpeg
 
 1. Clone or download the project:
 ```bash
-cd video2doc
+cd framenotes
 ```
 
 2. Create a virtual environment (recommended):
@@ -152,12 +152,16 @@ python main.py video.mp4 --verbose
 ## Project Structure
 
 ```
-video2doc/
+framenotes/
 ├── main.py              # CLI entry point
-├── gui.py               # Graphical user interface
-├── transcriber.py       # Audio extraction and transcription
-├── analyzer.py          # AI-powered content analysis
+├── gui.py               # Graphical user interface (v1 - Tkinter)
+├── gui_v2.py            # Graphical user interface (v2 - CustomTkinter)
+├── transcriber.py       # Audio extraction and transcription (v1)
+├── transcriber_v2.py    # Audio with chunking support (v2)
+├── analyzer.py          # AI-powered content analysis (v1)
+├── analyzer_v2.py       # Hierarchical analysis (v2)
 ├── screenshotter.py     # Video frame extraction
+├── config.py            # Configuration and settings
 ├── generators/
 │   ├── __init__.py
 │   ├── docx_gen.py      # Word document generator

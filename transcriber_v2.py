@@ -280,7 +280,7 @@ class ChunkedTranscriber:
         self._load_model(model_size)
 
         # Create temp directory for audio chunks
-        temp_dir = tempfile.mkdtemp(prefix="video2doc_audio_")
+        temp_dir = tempfile.mkdtemp(prefix="framenotes_audio_")
 
         try:
             # Extract full audio first

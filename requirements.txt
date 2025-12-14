@@ -1,4 +1,4 @@
-# Video2Doc - Video to Documentation Generator
+# FrameNotes - Video to Documentation Generator
 # Core Dependencies
 
 # Transcription

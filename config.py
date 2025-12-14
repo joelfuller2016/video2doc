@@ -179,9 +179,9 @@ LANGUAGE_CODES = {
 
 
 # Application settings
-APP_NAME = "Video2Doc"
+APP_NAME = "FrameNotes"
 APP_VERSION = "2.0.0"
-APP_TITLE = f"{APP_NAME} - Documentation Generator"
+APP_TITLE = f"{APP_NAME} - Video Documentation Generator"
 
 
 # UI Theme colors (for CustomTkinter)
@@ -279,7 +279,7 @@ class SettingsManager:
     Settings are stored in the user's home directory.
     """
 
-    DEFAULT_SETTINGS_FILE = "video2doc_settings.json"
+    DEFAULT_SETTINGS_FILE = "framenotes_settings.json"
 
     def __init__(self, settings_dir: Optional[str] = None):
         """
@@ -291,7 +291,7 @@ class SettingsManager:
         if settings_dir:
             self.settings_dir = Path(settings_dir)
         else:
-            self.settings_dir = Path.home() / ".video2doc"
+            self.settings_dir = Path.home() / ".framenotes"
 
         self.settings_file = self.settings_dir / self.DEFAULT_SETTINGS_FILE
         self.app_settings = AppSettings()

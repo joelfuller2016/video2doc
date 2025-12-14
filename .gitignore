@@ -87,3 +87,13 @@ models/
 # Whisper model downloads
 *.bin
 *.pt
+
+logs
+# Environment variables
+# Editor directories and files
+.idea
+.vscode
+
+# Task files
+# tasks.json
+# tasks/ 
