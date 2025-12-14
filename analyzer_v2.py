@@ -13,6 +13,11 @@ from enum import Enum
 from anthropic import Anthropic, APIError, APIConnectionError, RateLimitError
 
 from transcriber_v2 import TranscriptSegment, format_timestamp
+from config import CLAUDE_MODELS
+
+
+# Target string for SUPER_DETAILED_MODIFIER insertion - must exist in all prompts
+JSON_INSTRUCTION_TARGET = "Return ONLY valid JSON."
 
 
 class AnalysisStrategy(Enum):
@@ -157,6 +162,22 @@ SCREENSHOT RULES:
 Return ONLY valid JSON."""
 
 
+# Super detailed mode modifier - appended to prompts when enabled
+SUPER_DETAILED_MODIFIER = """
+
+SUPER DETAILED MODE ENABLED:
+Generate comprehensive, thorough documentation with:
+- Extended summaries (5-7 sentences instead of 1-2)
+- Detailed chapter/section breakdowns with step-by-step explanations
+- Complete technical explanations including all relevant details
+- Full context for each topic discussed
+- Step-by-step procedures with explicit instructions
+- Key terminology definitions where applicable
+- More screenshots (aim for 2-4 per section instead of 1-2)
+- Include any tips, warnings, or best practices mentioned
+"""
+
+
 class HierarchicalAnalyzer:
     """
     Enhanced analyzer with hierarchical analysis for large videos.
@@ -175,20 +196,37 @@ class HierarchicalAnalyzer:
     def __init__(
         self,
         api_key: Optional[str] = None,
+        model: str = "claude-sonnet-4-20250514",
         chapter_size_minutes: int = 12,
-        max_retries: int = 3
+        max_retries: int = 3,
+        super_detailed: bool = False
     ):
         """
         Initialize hierarchical analyzer.
 
         Args:
             api_key: Anthropic API key (uses env var if not provided)
+            model: Claude model to use for analysis
             chapter_size_minutes: Target chapter size for splitting
             max_retries: Max API retry attempts
+            super_detailed: Enable comprehensive documentation with extended details
         """
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+
+        # Validate model parameter
+        if model not in CLAUDE_MODELS:
+            import warnings
+            valid_models = list(CLAUDE_MODELS.keys())
+            warnings.warn(
+                f"Unknown Claude model '{model}'. Valid models: {valid_models}. "
+                f"Proceeding with specified model, but API calls may fail.",
+                UserWarning
+            )
+        self.model = model
+
         self.chapter_size_minutes = chapter_size_minutes
         self.max_retries = max_retries
+        self.super_detailed = super_detailed
         self._client = None
 
     @property
@@ -269,6 +307,18 @@ class HierarchicalAnalyzer:
             transcript=transcript_text,
             duration=f"{duration:.1f}"
         )
+
+        # Add super detailed modifier if enabled - INSERT BEFORE final JSON instruction
+        if self.super_detailed:
+            if JSON_INSTRUCTION_TARGET not in prompt:
+                raise RuntimeError(
+                    f"SUPER_DETAILED_MODIFIER cannot be applied: '{JSON_INSTRUCTION_TARGET}' "
+                    "not found in prompt. Prompt template may have changed."
+                )
+            prompt = prompt.replace(
+                JSON_INSTRUCTION_TARGET,
+                SUPER_DETAILED_MODIFIER + "\n" + JSON_INSTRUCTION_TARGET
+            )
 
         response = self._call_api(prompt)
         analysis = self._parse_json_response(response)
@@ -398,6 +448,18 @@ class HierarchicalAnalyzer:
             transcript=transcript_text
         )
 
+        # Add super detailed modifier if enabled - INSERT BEFORE final JSON instruction
+        if self.super_detailed:
+            if JSON_INSTRUCTION_TARGET not in prompt:
+                raise RuntimeError(
+                    f"SUPER_DETAILED_MODIFIER cannot be applied: '{JSON_INSTRUCTION_TARGET}' "
+                    "not found in prompt. Prompt template may have changed."
+                )
+            prompt = prompt.replace(
+                JSON_INSTRUCTION_TARGET,
+                SUPER_DETAILED_MODIFIER + "\n" + JSON_INSTRUCTION_TARGET
+            )
+
         response = self._call_api(prompt)
         analysis = self._parse_json_response(response)
 
@@ -468,13 +530,25 @@ Sections: {len(analysis.get('sections', []))}
         for attempt in range(self.max_retries):
             try:
                 response = self.client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model=self.model,
                     max_tokens=4096,
                     messages=[
                         {"role": "user", "content": prompt}
                     ]
                 )
-                return response.content[0].text
+
+                # Validate response structure
+                if not hasattr(response, 'content') or not response.content:
+                    raise RuntimeError("API returned empty or invalid response structure")
+
+                first_block = response.content[0]
+                if not hasattr(first_block, 'text'):
+                    raise RuntimeError(
+                        f"Unexpected response content type: {type(first_block).__name__}. "
+                        f"Expected TextBlock with 'text' attribute."
+                    )
+
+                return first_block.text
 
             except RateLimitError as e:
                 last_error = e
@@ -505,17 +579,29 @@ Sections: {len(analysis.get('sections', []))}
         raise RuntimeError(f"API call failed after {self.max_retries} attempts: {last_error}")
 
     def _parse_json_response(self, response_text: str) -> Dict:
-        """Parse JSON from API response"""
+        """Parse JSON from API response with robust extraction"""
         try:
-            # Handle markdown code blocks
+            # Handle markdown code blocks with bounds checking
             if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0]
+                parts = response_text.split("```json")
+                if len(parts) > 1:
+                    inner_parts = parts[1].split("```")
+                    if inner_parts:
+                        response_text = inner_parts[0]
             elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0]
+                parts = response_text.split("```")
+                if len(parts) > 1:
+                    # Take the first code block content
+                    response_text = parts[1]
+                    # If there's a closing ```, split on it
+                    if "```" in response_text:
+                        response_text = response_text.split("```")[0]
 
             return json.loads(response_text.strip())
         except json.JSONDecodeError as e:
-            raise ValueError(f"Failed to parse AI response as JSON: {e}")
+            # Include truncated response for debugging
+            preview = response_text[:200] + "..." if len(response_text) > 200 else response_text
+            raise ValueError(f"Failed to parse AI response as JSON: {e}\nResponse preview: {preview}")
 
 
 def get_screenshot_points(analysis: Dict) -> List[ScreenshotPoint]:
