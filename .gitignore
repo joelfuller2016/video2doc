@@ -1,0 +1,89 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE and Editor
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.swp
+*.swo
+*~
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dev-debug.log
+
+# Dependency directories
+node_modules/
+
+# Environment variables and API Keys - NEVER COMMIT
+.env
+.env.local
+.env.*.local
+*.key
+*api_key*
+*apikey*
+secrets/
+
+# Test files and outputs (keep project clean)
+test_video.mp4
+test_output.*
+test_screenshots/
+images/
+*_documentation.docx
+*_documentation.pptx
+*_documentation.md
+*_screenshots/
+
+# Temp files
+*.tmp
+*.temp
+
+# TaskMaster (keep structure, ignore generated content)
+.taskmaster/tasks/
+.taskmaster/reports/
+
+# Model cache (can be large)
+.cache/
+models/
+
+# Whisper model downloads
+*.bin
+*.pt

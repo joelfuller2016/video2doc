@@ -1,0 +1,18 @@
+# Video2Doc - Video to Documentation Generator
+# Core Dependencies
+
+# Transcription
+faster-whisper>=1.0.0
+
+# AI Analysis
+anthropic>=0.39.0
+
+# Document Generation
+python-docx>=1.1.0
+python-pptx>=0.6.23
+
+# Image Processing
+Pillow>=10.0.0
+
+# Utilities
+tqdm>=4.66.0
