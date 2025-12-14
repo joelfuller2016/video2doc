@@ -16,3 +16,5 @@ Pillow>=10.0.0
 
 # Utilities
 tqdm>=4.66.0
+# GUI - Modern UI (v2.0)
+customtkinter>=5.2.0

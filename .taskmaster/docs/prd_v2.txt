@@ -1,0 +1,139 @@
+# Video2Doc v2.0 - Large File Support & Modern UI
+
+## Overview
+Major enhancement to Video2Doc for handling large video files (up to 2 hours, 2-4GB) with intelligent auto-detection, modern UI using CustomTkinter, chunked processing, and hierarchical AI analysis.
+
+## Goals
+1. Support large video files up to 2 hours and 4GB
+2. Modernize UI with CustomTkinter dark mode
+3. Intelligent auto-detection of optimal processing parameters
+4. Efficient chunked processing with GPU acceleration
+5. Hierarchical AI analysis for comprehensive documentation
+
+## Requirements
+
+### 1. Modern UI with CustomTkinter
+
+#### 1.1 CustomTkinter Migration
+- Replace Tkinter with CustomTkinter library
+- Implement dark mode as default with light mode toggle
+- Use CTk widgets: CTkButton, CTkEntry, CTkProgressBar, CTkComboBox
+- Rounded corners and modern styling
+- Responsive layout that works at different window sizes
+
+#### 1.2 Enhanced File Info Display
+- Show file size in human-readable format (MB/GB)
+- Display video duration from FFprobe
+- Show detected processing tier (Small/Medium/Large)
+- Display recommended settings based on auto-detection
+
+#### 1.3 Advanced Options Panel
+- Collapsible/expandable advanced options section
+- Processing Mode toggle: Auto (recommended) / Manual
+- Manual mode reveals: chunk size slider, GPU toggle, quality preset
+- Checkpoint enable/disable for crash recovery
+- Custom Claude prompt input field
+
+### 2. Intelligent Auto-Detection System
+
+#### 2.1 VideoAnalyzer Class
+- Create new video_analyzer.py module
+- Use FFprobe to extract: duration, file size, codec, resolution, bitrate
+- Calculate optimal processing tier based on file characteristics
+
+#### 2.2 Processing Tiers
+- TIER 1 (Small): fileSize < 500MB AND duration < 30min
+  - Whisper model: base (or user preference if specified)
+  - Chunking: disabled (single-pass processing)
+  - Claude strategy: single-pass analysis
+
+- TIER 2 (Medium): fileSize 500MB-2GB OR duration 30-90min
+  - Whisper model: base
+  - Chunking: enabled, 10-minute chunks with 30-sec overlap
+  - Claude strategy: hierarchical (analyze chapters, synthesize)
+
+- TIER 3 (Large): fileSize > 2GB OR duration > 90min
+  - Whisper model: tiny or base (favor speed)
+  - Chunking: aggressive, 5-minute chunks
+  - Claude strategy: hierarchical with parallel analysis
+  - Checkpointing: enabled for crash recovery
+
+#### 2.3 Auto-Selection Logic
+- When model dropdown shows "Auto", detect tier and select optimal model
+- When "Manual" mode enabled, user selections override auto-detection
+- Display detected tier and recommendations in UI
+
+### 3. Chunked Transcription with GPU Support
+
+#### 3.1 Enhanced Transcriber
+- Modify transcriber.py to support chunked audio processing
+- Split audio into configurable chunk sizes (default 10 minutes)
+- Add overlap between chunks (default 30 seconds) to prevent word cuts
+- Implement smart chunk boundary detection at silence points
+
+#### 3.2 GPU Acceleration
+- Auto-detect CUDA availability using torch.cuda.is_available()
+- Use float16 compute type for GPU, int8 for CPU
+- Display GPU detection status in UI
+- Fallback gracefully to CPU if GPU unavailable
+
+#### 3.3 Progress Callbacks
+- Add progress_callback parameter to transcribe function
+- Report: current chunk, total chunks, percentage, estimated time remaining
+- Update UI progress bar in real-time
+
+#### 3.4 Checkpoint System
+- Save intermediate results after each chunk
+- Store checkpoints in temp directory with unique session ID
+- On crash/cancel, offer to resume from last checkpoint
+- Clean up checkpoints on successful completion
+
+### 4. Hierarchical AI Analysis
+
+#### 4.1 ChapterAnalyzer Class
+- Create new chapter_analyzer.py or extend analyzer.py
+- Split transcript into logical chapters (10-15 minutes each)
+- Analyze each chapter independently for: title, content, screenshot points
+
+#### 4.2 Synthesis Phase
+- After chapter analysis, synthesize into unified document structure
+- Generate overall title and summary from chapter summaries
+- Ensure section numbering and continuity across chapters
+- Deduplicate similar content across chapter boundaries
+
+#### 4.3 Progress Reporting
+- Report progress: "Analyzing chapter 2 of 8..."
+- Estimated completion time based on average chapter analysis time
+
+### 5. Requirements.txt Updates
+- Add customtkinter>=5.2.0
+- Add tkinterdnd2 for drag-and-drop support (optional)
+- Ensure torch[cuda] for GPU support hint in comments
+
+## Technical Implementation Notes
+
+### File Structure Changes
+```
+video2doc/
+├── gui.py              # Refactor to use CustomTkinter
+├── video_analyzer.py   # NEW: Auto-detection and tier selection
+├── transcriber.py      # Enhance with chunking and GPU support
+├── analyzer.py         # Enhance with hierarchical analysis
+├── checkpoint.py       # NEW: Checkpoint save/restore
+└── config.py           # NEW: Processing tier configurations
+```
+
+### Key Classes/Functions
+- VideoAnalyzer.analyze(video_path) -> ProcessingConfig
+- ProcessingConfig dataclass with all tier settings
+- ChunkedTranscriber.transcribe_with_progress(video, callback)
+- HierarchicalAnalyzer.analyze_chapters(segments, callback)
+- CheckpointManager.save/load/clean
+
+## Success Criteria
+- Successfully process 2-hour, 4GB video without OOM errors
+- Auto-detection correctly identifies processing tier
+- Modern dark-mode UI looks professional
+- GPU acceleration provides noticeable speedup when available
+- Checkpoint recovery works after simulated crash
+- Documentation quality matches or exceeds single-pass for short videos

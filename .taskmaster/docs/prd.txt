@@ -1,0 +1,76 @@
+# Video2Doc UI Feature - Product Requirements Document
+
+## Overview
+Add a graphical user interface (GUI) to Video2Doc that allows users to easily select videos, configure output options, and generate documentation without using the command line.
+
+## Goals
+1. Make Video2Doc accessible to non-technical users
+2. Provide visual feedback during processing
+3. Simplify the workflow for selecting videos and configuring outputs
+
+## Requirements
+
+### Core UI Features
+
+#### 1. Video Selection
+- File browser dialog for selecting input video
+- Display selected video path and file info (size, duration)
+- Support drag-and-drop (nice to have)
+
+#### 2. Output Configuration
+- Directory picker for output location
+- Format selection checkboxes (DOCX, PPTX, Markdown, All)
+- Whisper model dropdown (tiny, base, small, medium, large-v3)
+- Language selection (auto-detect or specify)
+- Include transcript checkbox (for markdown)
+- Keep screenshots checkbox
+
+#### 3. Progress Display
+- Progress bar showing current step
+- Status text showing what's happening
+- Elapsed time display
+
+#### 4. Controls
+- Start/Generate button
+- Cancel button (to stop processing)
+- Clear/Reset button
+
+### Technical Requirements
+- Use Tkinter (built into Python, no extra dependencies)
+- Use ttk for modern widget styling
+- Run processing in background thread to keep UI responsive
+- Handle errors gracefully with user-friendly messages
+
+### UI Layout
+```
++----------------------------------------+
+|  Video2Doc - Documentation Generator   |
++----------------------------------------+
+| Input Video: [________________] [Browse]|
+| Video Info: test.mp4 (3.1 MB, 70s)     |
++----------------------------------------+
+| Output Folder: [____________] [Browse]  |
+|                                         |
+| Output Format:                          |
+| [x] Word (.docx)  [x] PowerPoint (.pptx)|
+| [x] Markdown (.md)                      |
+|                                         |
+| Whisper Model: [base v]                 |
+| Language: [Auto-detect v]               |
+|                                         |
+| [ ] Include full transcript (Markdown)  |
+| [ ] Keep screenshot files               |
++----------------------------------------+
+| Progress: [============      ] 60%      |
+| Status: Analyzing with Claude AI...     |
+| Elapsed: 00:45                          |
++----------------------------------------+
+| [  Generate  ]  [ Cancel ]  [ Clear ]   |
++----------------------------------------+
+```
+
+## Success Criteria
+- User can generate documentation without touching command line
+- Processing shows real-time progress updates
+- Errors are displayed clearly to user
+- Application works on Windows, Mac, and Linux
