@@ -15,9 +15,15 @@ import shutil
 from pathlib import Path
 from typing import Optional, Callable
 from dataclasses import dataclass
+from collections import deque
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
+
+from logger import get_logger, init_logging, set_debug_mode, is_debug_mode, get_log_file_path, LogContext
+
+# Module logger
+logger = get_logger(__name__)
 
 # Import FrameNotes modules (v2 with chunking and hierarchical analysis)
 from transcriber_v2 import ChunkedTranscriber, transcribe, get_full_transcript
@@ -29,7 +35,8 @@ from video_analyzer import VideoAnalyzer, VideoInfo, ProcessingConfig, Processin
 from config import (
     APP_TITLE, APP_VERSION, WHISPER_MODELS, LANGUAGE_CODES,
     QUALITY_PRESETS, SUPPORTED_VIDEO_FORMATS, ProcessingSettings,
-    CLAUDE_MODELS, SETTING_TOOLTIPS, get_settings_manager, SettingsManager
+    CLAUDE_MODELS, SETTING_TOOLTIPS, get_settings_manager, SettingsManager,
+    validate_api_key_format
 )
 
 
@@ -38,7 +45,7 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 
-@dataclass
+@dataclass(frozen=True)
 class ProcessingSnapshot:
     """
     Thread-safe snapshot of all processing settings.
@@ -60,6 +67,26 @@ class ProcessingSnapshot:
     format_md: bool
     include_transcript: bool
     keep_screenshots: bool
+
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize a filename to prevent path traversal attacks.
+    Removes dangerous characters and path components.
+    """
+    import re
+    # Remove path separators and parent directory references
+    filename = filename.replace('/', '_').replace('\\', '_').replace('..', '_')
+    # Remove null bytes and other control characters
+    filename = re.sub(r'[\x00-\x1f\x7f]', '', filename)
+    # Keep only safe characters: alphanumeric, space, dash, underscore, dot
+    filename = re.sub(r'[^\w\s\-.]', '_', filename)
+    # Collapse multiple underscores
+    filename = re.sub(r'_+', '_', filename)
+    # Strip leading/trailing whitespace and underscores
+    filename = filename.strip(' _')
+    # Ensure non-empty result
+    return filename if filename else 'video'
 
 
 class CTkToolTip:
@@ -139,6 +166,7 @@ class SettingsWindow(ctk.CTkToplevel):
 
     def __init__(self, parent, settings_manager: SettingsManager, on_save: Callable = None):
         super().__init__(parent)
+        logger.debug("Opening Settings window")
 
         self.settings_manager = settings_manager
         self.on_save_callback = on_save
@@ -181,9 +209,10 @@ class SettingsWindow(ctk.CTkToplevel):
         self.tab_processing = self.tabview.add("Processing")
         self.tab_output = self.tabview.add("Output")
         self.tab_help = self.tabview.add("Help")
+        self.tab_debug = self.tabview.add("Debug")
 
         # Configure tab grids
-        for tab in [self.tab_general, self.tab_api, self.tab_processing, self.tab_output]:
+        for tab in [self.tab_general, self.tab_api, self.tab_processing, self.tab_output, self.tab_debug]:
             tab.grid_columnconfigure(0, weight=1)
 
         # Build each tab
@@ -192,6 +221,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self._build_processing_tab()
         self._build_output_tab()
         self._build_help_tab()
+        self._build_debug_tab()
 
         # Buttons at bottom
         button_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
@@ -677,6 +707,148 @@ Powered by Whisper AI and Claude AI
         help_text.insert("1.0", documentation)
         help_text.configure(state="disabled")  # Make read-only
 
+    def _build_debug_tab(self):
+        """Build Debug tab with log viewer and debug controls"""
+        tab = self.tab_debug
+        tab.grid_rowconfigure(1, weight=1)
+        tab.grid_columnconfigure(0, weight=1)
+
+        # Debug mode section
+        section = ctk.CTkFrame(tab)
+        section.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        section.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            section,
+            text="Debug Settings",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).grid(row=0, column=0, sticky="w", padx=15, pady=(15, 10))
+
+        # Debug mode switch
+        self.debug_mode_var = ctk.BooleanVar(value=is_debug_mode())
+        debug_switch = ctk.CTkSwitch(
+            section,
+            text="Enable Debug Mode (verbose console logging)",
+            variable=self.debug_mode_var,
+            command=self._on_debug_mode_change
+        )
+        debug_switch.grid(row=1, column=0, sticky="w", padx=15, pady=(0, 15))
+        CTkToolTip(debug_switch, "When enabled, shows DEBUG level messages in console output")
+
+        # Log viewer section
+        section2 = ctk.CTkFrame(tab)
+        section2.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        section2.grid_rowconfigure(1, weight=1)
+        section2.grid_columnconfigure(0, weight=1)
+
+        header_frame = ctk.CTkFrame(section2, fg_color="transparent")
+        header_frame.grid(row=0, column=0, sticky="ew", padx=15, pady=(10, 5))
+        header_frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            header_frame,
+            text="Log Viewer",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(side="left")
+
+        # Refresh and clear buttons
+        btn_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
+        btn_frame.pack(side="right")
+
+        ctk.CTkButton(
+            btn_frame,
+            text="Refresh",
+            width=80,
+            command=self._refresh_log_viewer
+        ).pack(side="left", padx=5)
+
+        ctk.CTkButton(
+            btn_frame,
+            text="Open Log File",
+            width=100,
+            fg_color="gray40",
+            hover_color="gray30",
+            command=self._open_log_file
+        ).pack(side="left", padx=5)
+
+        # Log text display
+        self.log_textbox = ctk.CTkTextbox(
+            section2,
+            wrap="none",
+            font=ctk.CTkFont(family="Consolas", size=11)
+        )
+        self.log_textbox.grid(row=1, column=0, sticky="nsew", padx=15, pady=(0, 15))
+
+        # Log file path info
+        log_path = get_log_file_path()
+        path_text = str(log_path) if log_path else "No log file"
+        self.log_path_label = ctk.CTkLabel(
+            section2,
+            text=f"Log file: {path_text}",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        self.log_path_label.grid(row=2, column=0, sticky="w", padx=15, pady=(0, 10))
+
+        # Load initial log content
+        self._refresh_log_viewer()
+
+    def _on_debug_mode_change(self):
+        """Handle debug mode toggle"""
+        enabled = self.debug_mode_var.get()
+        set_debug_mode(enabled)
+        status = "enabled" if enabled else "disabled"
+        logger.info(f"[{LogContext.CONFIG}] Debug mode {status} by user")
+
+    def _refresh_log_viewer(self):
+        """Refresh the log viewer content"""
+        try:
+            log_path = get_log_file_path()
+            if log_path and log_path.exists():
+                with open(log_path, "r", encoding="utf-8") as f:
+                    # Memory-efficient: deque reads line-by-line, keeping only last 500
+                    last_lines = deque(f, maxlen=500)
+                    content = "".join(last_lines)
+
+                self.log_textbox.configure(state="normal")
+                self.log_textbox.delete("1.0", "end")
+                self.log_textbox.insert("1.0", content)
+                self.log_textbox.configure(state="disabled")
+                # Scroll to bottom
+                self.log_textbox.see("end")
+            else:
+                self.log_textbox.configure(state="normal")
+                self.log_textbox.delete("1.0", "end")
+                self.log_textbox.insert("1.0", "No log file found.")
+                self.log_textbox.configure(state="disabled")
+        except (IOError, OSError, PermissionError) as e:
+            self.log_textbox.configure(state="normal")
+            self.log_textbox.delete("1.0", "end")
+            self.log_textbox.insert("1.0", f"Error reading log: {e}")
+            self.log_textbox.configure(state="disabled")
+
+    def _open_log_file(self):
+        """Open log file in system default editor"""
+        try:
+            log_path = get_log_file_path()
+            if log_path and log_path.exists():
+                import subprocess
+                if sys.platform == "win32":
+                    os.startfile(str(log_path))
+                elif sys.platform == "darwin":
+                    result = subprocess.run(["open", str(log_path)], capture_output=True)
+                    if result.returncode != 0:
+                        raise OSError(f"open command failed: {result.stderr.decode()}")
+                else:
+                    result = subprocess.run(["xdg-open", str(log_path)], capture_output=True)
+                    if result.returncode != 0:
+                        raise OSError(f"xdg-open command failed: {result.stderr.decode()}")
+            else:
+                messagebox.showwarning("Warning", "Log file not found.")
+        except (OSError, FileNotFoundError, subprocess.SubprocessError) as e:
+            logger.error(f"Failed to open log file: {e}")
+            messagebox.showerror("Error", f"Could not open log file: {e}")
+
     def _toggle_api_key_visibility(self):
         """Toggle API key visibility"""
         if self.show_key_var.get():
@@ -688,9 +860,22 @@ Powered by Whisper AI and Claude AI
         """Test the API connection"""
         api_key = self.api_key_var.get().strip()
         if not api_key:
+            logger.warning("API connection test attempted without API key")
             messagebox.showwarning("Warning", "Please enter an API key first.")
             return
 
+        # Validate key format before testing
+        is_valid, error_msg = validate_api_key_format(api_key)
+        if not is_valid:
+            logger.warning(f"API key format validation failed: {error_msg}")
+            messagebox.showwarning(
+                "Invalid API Key Format",
+                f"The API key format appears invalid:\n{error_msg}\n\n"
+                "Please check your key and try again."
+            )
+            return
+
+        logger.info("Testing API connection...")
         try:
             import anthropic
             client = anthropic.Anthropic(api_key=api_key)
@@ -700,8 +885,10 @@ Powered by Whisper AI and Claude AI
                 max_tokens=10,
                 messages=[{"role": "user", "content": "Hi"}]
             )
+            logger.info("API connection test successful")
             messagebox.showinfo("Success", "API connection successful!")
         except Exception as e:
+            logger.error(f"API connection test failed: {e}")
             messagebox.showerror("Error", f"API connection failed:\n{str(e)}")
 
     def _on_preset_change(self, value):
@@ -757,8 +944,19 @@ Powered by Whisper AI and Claude AI
                 proc.language = code
                 break
 
-        # API
-        app.api_key = self.api_key_var.get().strip()
+        # API - validate key format before saving
+        api_key = self.api_key_var.get().strip()
+        if api_key:  # Only validate non-empty keys
+            is_valid, error_msg = validate_api_key_format(api_key)
+            if not is_valid:
+                logger.warning(f"Invalid API key format: {error_msg}")
+                messagebox.showwarning(
+                    "Invalid API Key",
+                    f"API key format validation failed:\n{error_msg}\n\n"
+                    "The key will not be saved. Please check your key and try again."
+                )
+                return  # Don't save if API key is invalid
+        app.api_key = api_key
         proc.claude_model = self.claude_model_var.get()
 
         # Processing
@@ -785,6 +983,8 @@ Powered by Whisper AI and Claude AI
 
         # Save to file
         self.settings_manager.save()
+        logger.info("Settings saved successfully")
+        logger.debug(f"Settings: model={proc.claude_model}, whisper={proc.whisper_model}, chunking={proc.enable_chunking}")
 
         # Apply theme immediately
         ctk.set_appearance_mode(app.theme)
@@ -808,6 +1008,7 @@ class FrameNotesApp(ctk.CTk):
 
     def __init__(self):
         super().__init__()
+        logger.info("Initializing FrameNotes GUI v2.0")
 
         # Settings manager (load settings from file)
         self.settings_manager = get_settings_manager()
@@ -826,6 +1027,10 @@ class FrameNotesApp(ctk.CTk):
         self.cancel_event = threading.Event()
         self.progress_queue = queue.Queue()
         self.start_time = None
+        self._processing_thread = None  # Track thread for graceful shutdown
+
+        # Register graceful shutdown handler for window close
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
         # Video analyzer
         self.analyzer = VideoAnalyzer()
@@ -856,6 +1061,7 @@ class FrameNotesApp(ctk.CTk):
         self._setup_keyboard_shortcuts()
         self._check_api_key()
         self._update_gpu_status()
+        logger.debug("GUI v2.0 initialization complete")
 
     def _setup_keyboard_shortcuts(self):
         """Setup keyboard shortcuts"""
@@ -866,6 +1072,7 @@ class FrameNotesApp(ctk.CTk):
     def _check_api_key(self):
         """Check if API key is set"""
         if not self.settings_manager.get_api_key():
+            logger.warning("ANTHROPIC_API_KEY not configured")
             messagebox.showwarning(
                 "API Key Missing",
                 "Anthropic API key not configured.\n\n"
@@ -873,6 +1080,8 @@ class FrameNotesApp(ctk.CTk):
                 "or set the ANTHROPIC_API_KEY environment variable.\n\n"
                 "Press Ctrl+S to open Settings."
             )
+        else:
+            logger.debug("API key found in configuration")
 
     def _update_gpu_status(self):
         """Update GPU availability status"""
@@ -1316,25 +1525,32 @@ class FrameNotesApp(ctk.CTk):
 
     def _browse_video(self):
         """Open file dialog to select video"""
-        extensions = " ".join([f"*{ext}" for ext in SUPPORTED_VIDEO_FORMATS])
-        filetypes = [
-            ("Video files", extensions),
-            ("All files", "*.*")
-        ]
-        filepath = filedialog.askopenfilename(
-            title="Select Video File",
-            filetypes=filetypes
-        )
-        if filepath:
-            self.video_path.set(filepath)
-            self._analyze_video(filepath)
+        logger.debug(f"[{LogContext.UI}] Opening video file dialog")
+        try:
+            extensions = " ".join([f"*{ext}" for ext in SUPPORTED_VIDEO_FORMATS])
+            filetypes = [
+                ("Video files", extensions),
+                ("All files", "*.*")
+            ]
+            filepath = filedialog.askopenfilename(
+                title="Select Video File",
+                filetypes=filetypes
+            )
+            if filepath:
+                logger.info(f"[{LogContext.FILE}] Video selected: {filepath}")
+                self.video_path.set(filepath)
+                self._analyze_video(filepath)
 
-            # Auto-set output directory
-            if not self.output_dir.get():
-                self.output_dir.set(str(Path(filepath).parent))
+                # Auto-set output directory
+                if not self.output_dir.get():
+                    self.output_dir.set(str(Path(filepath).parent))
+        except Exception as e:
+            logger.error(f"[{LogContext.UI}] Error in browse video: {e}")
+            messagebox.showerror("Error", f"Failed to load video: {e}")
 
     def _analyze_video(self, filepath: str):
         """Analyze video and update UI with recommendations"""
+        logger.debug(f"[{LogContext.ANALYZE}] Starting video analysis: {filepath}")
         try:
             self.video_info_label.configure(text="Analyzing video...", text_color="gray")
             self.tier_label.configure(text="")
@@ -1359,11 +1575,15 @@ class FrameNotesApp(ctk.CTk):
             color, _ = tier_colors.get(config.tier, ("#6b7280", "Unknown"))
             self.tier_label.configure(text=f"⬤ {tier_display}", text_color=color)
 
+            logger.info(f"Video analyzed: {video_info.duration_formatted}, {self.analyzer.format_file_size(video_info.file_size_bytes)}, tier={config.tier.name}")
+            logger.debug(f"Recommended config: model={config.whisper_model}, chunking={config.chunking_enabled}, strategy={config.claude_strategy}")
+
             # Apply auto-detected settings if enabled
             if self.auto_detect_var.get():
                 self._update_auto_settings()
 
         except Exception as e:
+            logger.error(f"Error analyzing video: {e}")
             self.video_info_label.configure(text=f"Error: {str(e)[:50]}...", text_color="#ef4444")
             self.tier_label.configure(text="")
             self.current_video_info = None
@@ -1458,8 +1678,19 @@ class FrameNotesApp(ctk.CTk):
 
     def _start_generation(self):
         """Start the documentation generation process"""
+        # Guard against concurrent processing - prevent duplicate generation attempts
+        if self.processing:
+            logger.warning(f"[{LogContext.PROCESS}] Generation already in progress, ignoring duplicate request")
+            return
+
         if not self._validate_inputs():
             return
+
+        logger.info(f"[{LogContext.PROCESS}] ============================================================")
+        logger.info(f"[{LogContext.PROCESS}] Starting documentation generation")
+        logger.info(f"  Video: {self.video_path.get()}")
+        logger.info(f"  Output: {self.output_dir.get()}")
+        logger.info(f"  Formats: DOCX={self.format_docx.get()}, PPTX={self.format_pptx.get()}, MD={self.format_md.get()}")
 
         self.processing = True
         self.cancel_event.clear()
@@ -1497,16 +1728,46 @@ class FrameNotesApp(ctk.CTk):
         )
 
         # Start processing thread with snapshot
-        thread = threading.Thread(target=self._process_video, args=(snapshot,), daemon=True)
-        thread.start()
+        # Store thread reference for graceful shutdown
+        self._processing_thread = threading.Thread(target=self._process_video, args=(snapshot,), daemon=True)
+        self._processing_thread.start()
 
         # Start progress polling
         self._poll_progress()
 
     def _cancel_generation(self):
         """Cancel the ongoing generation"""
+        logger.info("Cancellation requested by user")
         self.cancel_event.set()
         self.status_label.configure(text="Cancelling...")
+
+    def _on_window_close(self):
+        """Handle graceful shutdown when window is closed.
+
+        Ensures background threads complete or timeout gracefully to prevent:
+        - Orphaned temp files
+        - Corrupted output files from mid-write interruption
+        - Resource leaks
+        """
+        if self.processing and self._processing_thread and self._processing_thread.is_alive():
+            logger.info(f"[{LogContext.PROCESS}] Window close requested during processing - initiating graceful shutdown")
+
+            # Signal thread to stop
+            self.cancel_event.set()
+
+            # Wait for thread to finish with timeout
+            shutdown_timeout = 5.0  # seconds
+            self._processing_thread.join(timeout=shutdown_timeout)
+
+            if self._processing_thread.is_alive():
+                logger.warning(f"[{LogContext.PROCESS}] Processing thread did not stop within {shutdown_timeout}s timeout")
+            else:
+                logger.info(f"[{LogContext.PROCESS}] Processing thread stopped gracefully")
+        else:
+            logger.debug(f"[{LogContext.PROCESS}] No active processing - closing immediately")
+
+        # Destroy the window
+        self.destroy()
 
     def _poll_progress(self):
         """Poll progress queue and update UI"""
@@ -1546,11 +1807,16 @@ class FrameNotesApp(ctk.CTk):
         """
         video_path = snapshot.video_path
         output_dir = Path(snapshot.output_dir)
-        video_name = Path(video_path).stem
+        video_name = sanitize_filename(Path(video_path).stem)
+
+        logger.info(f"[{LogContext.PROCESS}] >>> START Background processing for: {video_name}")
+        logger.debug(f"[{LogContext.CONFIG}] Processing settings: model={snapshot.whisper_model}, chunking={snapshot.enable_chunking}, GPU={snapshot.use_gpu}")
+        logger.debug(f"[{LogContext.CONFIG}] Claude settings: model={snapshot.claude_model}, strategy={snapshot.claude_strategy}, detailed={snapshot.super_detailed}")
 
         temp_dir = tempfile.mkdtemp(prefix="framenotes_gui_")
         screenshots_dir = Path(temp_dir) / "screenshots"
         screenshots_dir.mkdir(parents=True, exist_ok=True)
+        logger.debug(f"Using temp directory: {temp_dir}")
 
         try:
             # Use settings from snapshot (thread-safe)
@@ -1744,6 +2010,9 @@ class FrameNotesApp(ctk.CTk):
             })
 
         except Exception as e:
+            logger.error(f"Error during video processing: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
             self.progress_queue.put({
                 'type': 'error',
                 'message': str(e)
@@ -1753,6 +2022,7 @@ class FrameNotesApp(ctk.CTk):
             if not snapshot.keep_screenshots:
                 try:
                     shutil.rmtree(temp_dir, ignore_errors=True)
+                    logger.debug(f"Cleaned up temp directory: {temp_dir}")
                 except Exception:
                     pass
 
@@ -1765,6 +2035,11 @@ class FrameNotesApp(ctk.CTk):
 
         elapsed = int(time.time() - self.start_time)
         mins, secs = divmod(elapsed, 60)
+
+        logger.info(f"[{LogContext.PROCESS}] <<< END Documentation generation completed in {mins}m {secs}s")
+        for f in files:
+            logger.info(f"[{LogContext.EXPORT}]   Generated: {f}")
+        logger.info(f"[{LogContext.PROCESS}] ============================================================")
 
         file_list = "\n".join([f"  • {Path(f).name}" for f in files])
         messagebox.showinfo(
@@ -1782,6 +2057,8 @@ class FrameNotesApp(ctk.CTk):
         self.clear_btn.configure(state="normal")
         self.status_label.configure(text=f"Error: {message[:50]}...")
 
+        logger.error(f"[{LogContext.PROCESS}] <<< FAILED Generation error: {message}")
+        logger.info(f"[{LogContext.PROCESS}] ============================================================")
         messagebox.showerror("Error", f"Generation failed:\n\n{message}")
 
     def _on_cancelled(self):
@@ -1792,12 +2069,21 @@ class FrameNotesApp(ctk.CTk):
         self.clear_btn.configure(state="normal")
         self.status_label.configure(text="Generation cancelled")
         self.progress_bar.set(0)
+        logger.info("Generation cancelled by user")
 
 
 def main():
     """Main entry point for GUI"""
+    # Initialize logging for GUI mode
+    init_logging(verbose=False)
+    logger.info(f"[{LogContext.INIT}] ============================================================")
+    logger.info(f"[{LogContext.INIT}] Starting FrameNotes GUI v2.0 application")
+    logger.info(f"[{LogContext.INIT}] ============================================================")
+
     app = FrameNotesApp()
+    logger.debug("Entering main event loop")
     app.mainloop()
+    logger.info("FrameNotes GUI v2.0 application closed")
 
 
 if __name__ == "__main__":
