@@ -14,6 +14,10 @@ from anthropic import Anthropic, APIError, APIConnectionError, RateLimitError
 
 from transcriber_v2 import TranscriptSegment, format_timestamp
 from config import CLAUDE_MODELS
+from logger import get_logger, LogContext, api_logger
+
+# Module logger
+logger = get_logger(__name__)
 
 
 # Target string for SUPER_DETAILED_MODIFIER insertion - must exist in all prompts
@@ -273,7 +277,7 @@ class HierarchicalAnalyzer:
             else:
                 strategy = "hierarchical-parallel"
 
-        print(f"Analysis strategy: {strategy} (duration: {duration_minutes:.1f} min)")
+        logger.info(f"Analysis strategy: {strategy} (duration: {duration_minutes:.1f} min)")
 
         if strategy == "single-pass":
             return self._analyze_single_pass(segments, progress_callback)
@@ -341,7 +345,7 @@ class HierarchicalAnalyzer:
         chapters = self._split_into_chapters(segments, duration_seconds)
         total_chapters = len(chapters)
 
-        print(f"Split into {total_chapters} chapters for analysis")
+        logger.info(f"Split into {total_chapters} chapters for analysis")
 
         # Analyze each chapter
         chapter_analyses = []
@@ -554,7 +558,7 @@ Sections: {len(analysis.get('sections', []))}
                 last_error = e
                 if attempt < self.max_retries - 1:
                     wait_time = 2 ** (attempt + 1)
-                    print(f"Rate limited. Retrying in {wait_time}s...")
+                    logger.warning(f"Rate limited. Retrying in {wait_time}s... (attempt {attempt + 1}/{self.max_retries})")
                     time.sleep(wait_time)
                 else:
                     raise RuntimeError(f"API rate limit exceeded: {e}")
@@ -563,7 +567,7 @@ Sections: {len(analysis.get('sections', []))}
                 last_error = e
                 if attempt < self.max_retries - 1:
                     wait_time = 2 ** attempt
-                    print(f"Connection error. Retrying in {wait_time}s...")
+                    logger.warning(f"Connection error. Retrying in {wait_time}s... (attempt {attempt + 1}/{self.max_retries})")
                     time.sleep(wait_time)
                 else:
                     raise RuntimeError(f"API connection failed: {e}")
@@ -571,7 +575,7 @@ Sections: {len(analysis.get('sections', []))}
             except APIError as e:
                 last_error = e
                 if attempt < self.max_retries - 1:
-                    print(f"API error. Retrying...")
+                    logger.warning(f"API error. Retrying... (attempt {attempt + 1}/{self.max_retries})")
                     time.sleep(2)
                 else:
                     raise RuntimeError(f"API error: {e}")
@@ -690,7 +694,10 @@ def analyze_transcript(
 
 
 if __name__ == "__main__":
+    from logger import init_logging
     from transcriber_v2 import TranscriptSegment
+
+    init_logging(verbose=True)
 
     # Test with mock segments (simulating a longer video)
     test_segments = []
@@ -703,7 +710,7 @@ if __name__ == "__main__":
         test_segments.append(TranscriptSegment(start, end, text))
 
     def progress(current, total, status):
-        print(f"[{current}/{total}] {status}")
+        logger.info(f"[{current}/{total}] {status}")
 
     try:
         analyzer = HierarchicalAnalyzer()
@@ -713,16 +720,16 @@ if __name__ == "__main__":
             progress_callback=progress
         )
 
-        print("\nAnalysis Result:")
-        print(f"Title: {analysis.get('title')}")
-        print(f"Summary: {analysis.get('summary')}")
-        print(f"Chapters: {len(analysis.get('chapters', []))}")
-        print(f"Sections: {len(analysis.get('sections', []))}")
+        logger.info("Analysis Result:")
+        logger.info(f"Title: {analysis.get('title')}")
+        logger.info(f"Summary: {analysis.get('summary')}")
+        logger.info(f"Chapters: {len(analysis.get('chapters', []))}")
+        logger.info(f"Sections: {len(analysis.get('sections', []))}")
 
         points = get_screenshot_points(analysis)
-        print(f"\nScreenshot Points ({len(points)}):")
+        logger.info(f"Screenshot Points ({len(points)}):")
         for p in points:
-            print(f"  - {format_timestamp(p.timestamp)}: {p.section_title}")
+            logger.info(f"  - {format_timestamp(p.timestamp)}: {p.section_title}")
 
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"Error: {e}")

@@ -12,6 +12,35 @@ from dataclasses import dataclass
 
 from PIL import Image
 
+from logger import get_logger, LogContext
+from utils.ffmpeg_builder import (
+    FFmpegCommandBuilder,
+    FFmpegError,
+    FFmpegNotFoundError,
+    FFmpegTimeoutError,
+    FFmpegExecutionError,
+    PathValidationError
+)
+from utils.path_validator import (
+    is_safe_path,
+    validate_output_directory,
+    validate_file_output_path,
+)
+
+# Module logger
+logger = get_logger(__name__)
+
+# Shared FFmpeg command builder instance
+_ffmpeg_builder: Optional[FFmpegCommandBuilder] = None
+
+
+def _get_builder() -> FFmpegCommandBuilder:
+    """Get or create the shared FFmpegCommandBuilder instance."""
+    global _ffmpeg_builder
+    if _ffmpeg_builder is None:
+        _ffmpeg_builder = FFmpegCommandBuilder()
+    return _ffmpeg_builder
+
 
 @dataclass
 class Screenshot:
@@ -31,21 +60,30 @@ def get_video_duration(video_path: str) -> float:
 
     Returns:
         Duration in seconds
+
+    Raises:
+        RuntimeError: If FFprobe fails or path validation fails
     """
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        video_path
-    ]
+    logger.debug(f"Getting video duration for: {video_path}")
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
-        return float(result.stdout.strip())
-    except subprocess.TimeoutExpired:
+        builder = _get_builder()
+        cmd = builder.get_duration(video_path, timeout=30)
+        result = cmd.execute()
+        duration = float(result.stdout.strip())
+        logger.debug(f"Video duration: {duration:.1f}s")
+        return duration
+    except PathValidationError as e:
+        logger.error(f"Invalid video path: {e}")
+        raise RuntimeError(f"Invalid video path: {e}")
+    except FFmpegTimeoutError:
+        logger.error("FFprobe timed out getting video duration")
         raise RuntimeError("FFprobe timed out getting video duration")
-    except (subprocess.CalledProcessError, ValueError) as e:
+    except FFmpegNotFoundError as e:
+        logger.error(str(e))
+        raise RuntimeError(str(e))
+    except (FFmpegExecutionError, ValueError) as e:
+        logger.error(f"Failed to get video duration: {e}")
         raise RuntimeError(f"Failed to get video duration: {e}")
 
 
@@ -58,23 +96,30 @@ def get_video_resolution(video_path: str) -> Tuple[int, int]:
 
     Returns:
         Tuple of (width, height)
+
+    Raises:
+        RuntimeError: If FFprobe fails or path validation fails
     """
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=width,height",
-        "-of", "csv=p=0:s=x",
-        video_path
-    ]
+    logger.debug(f"Getting video resolution for: {video_path}")
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+        builder = _get_builder()
+        cmd = builder.get_resolution(video_path, timeout=30)
+        result = cmd.execute()
         width, height = result.stdout.strip().split("x")
+        logger.debug(f"Video resolution: {width}x{height}")
         return int(width), int(height)
-    except subprocess.TimeoutExpired:
+    except PathValidationError as e:
+        logger.error(f"Invalid video path: {e}")
+        raise RuntimeError(f"Invalid video path: {e}")
+    except FFmpegTimeoutError:
+        logger.error("FFprobe timed out getting video resolution")
         raise RuntimeError("FFprobe timed out getting video resolution")
-    except (subprocess.CalledProcessError, ValueError) as e:
+    except FFmpegNotFoundError as e:
+        logger.error(str(e))
+        raise RuntimeError(str(e))
+    except (FFmpegExecutionError, ValueError) as e:
+        logger.error(f"Failed to get video resolution: {e}")
         raise RuntimeError(f"Failed to get video resolution: {e}")
 
 
@@ -95,54 +140,63 @@ def capture_frame(
 
     Returns:
         Screenshot object with metadata
+
+    Raises:
+        FileNotFoundError: If video file not found
+        RuntimeError: If FFmpeg fails or path validation fails
     """
-    video_path = Path(video_path)
-    output_path = Path(output_path)
+    video_path_obj = Path(video_path)
 
-    if not video_path.exists():
-        raise FileNotFoundError(f"Video file not found: {video_path}")
+    # Validate output path for security
+    output_result = validate_file_output_path(
+        output_path,
+        allowed_extensions=[".png", ".jpg", ".jpeg"],
+        create_parent_dirs=True
+    )
+    if not output_result.is_valid:
+        raise ValueError(f"Invalid output path: {output_result.error_message}")
+    output_path_obj = Path(output_result.sanitized_value)
 
-    # Ensure output directory exists
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # FFmpeg command to extract single frame
-    # Using -ss before -i for faster seeking
-    cmd = [
-        "ffmpeg",
-        "-ss", str(timestamp),         # Seek to timestamp
-        "-i", str(video_path),         # Input file
-        "-vframes", "1",               # Extract 1 frame
-        "-q:v", str(quality),          # Quality setting
-        "-y",                          # Overwrite output
-        str(output_path)
-    ]
+    logger.debug(f"Capturing frame at {timestamp}s from {video_path_obj}")
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=60  # 1 minute timeout per frame
+        builder = _get_builder()
+        cmd = builder.capture_frame(
+            str(video_path_obj),
+            str(output_path_obj),
+            timestamp=timestamp,
+            quality=quality,
+            timeout=60
         )
-    except subprocess.TimeoutExpired:
+        cmd.execute()
+    except PathValidationError as e:
+        if "does not exist" in str(e):
+            logger.error(f"Video file not found: {video_path_obj}")
+            raise FileNotFoundError(f"Video file not found: {video_path_obj}")
+        logger.error(f"Invalid path: {e}")
+        raise RuntimeError(f"Invalid path: {e}")
+    except FFmpegTimeoutError:
+        logger.error(f"Frame extraction timed out at {timestamp}s")
         raise RuntimeError(f"Frame extraction timed out at {timestamp}s")
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Frame extraction failed at {timestamp}s: {e.stderr}")
-    except FileNotFoundError:
+    except FFmpegNotFoundError as e:
+        logger.error(str(e))
         raise RuntimeError("FFmpeg not found. Please install FFmpeg and add it to PATH.")
+    except FFmpegExecutionError as e:
+        logger.error(f"Frame extraction failed at {timestamp}s: {e}")
+        raise RuntimeError(f"Frame extraction failed at {timestamp}s: {e}")
 
     # Verify output was created
-    if not output_path.exists():
-        raise RuntimeError(f"Frame extraction failed - output not created: {output_path}")
+    if not output_path_obj.exists():
+        logger.error(f"Frame extraction failed - output not created: {output_path_obj}")
+        raise RuntimeError(f"Frame extraction failed - output not created: {output_path_obj}")
 
     # Get image dimensions
-    with Image.open(output_path) as img:
+    with Image.open(output_path_obj) as img:
         width, height = img.size
 
     return Screenshot(
         timestamp=timestamp,
-        filepath=str(output_path),
+        filepath=str(output_path_obj),
         width=width,
         height=height
     )
@@ -168,14 +222,20 @@ def capture_screenshots(
     Returns:
         List of Screenshot objects
     """
+    # Validate video path for security
+    is_safe, error = is_safe_path(video_path)
+    if not is_safe:
+        raise ValueError(f"Invalid video path: {error}")
     video_path = Path(video_path)
-    output_dir = Path(output_dir)
 
     if not video_path.exists():
         raise FileNotFoundError(f"Video file not found: {video_path}")
 
-    # Create output directory
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Validate output directory for security
+    output_result = validate_output_directory(output_dir, create_if_missing=True)
+    if not output_result.is_valid:
+        raise ValueError(f"Invalid output directory: {output_result.error_message}")
+    output_dir = Path(output_result.sanitized_value)
 
     # Get video duration for validation
     duration = get_video_duration(str(video_path))
@@ -188,12 +248,12 @@ def capture_screenshots(
         if 0 <= ts <= duration:
             valid_timestamps.append(ts)
         else:
-            print(f"Warning: Skipping invalid timestamp {ts}s (video duration: {duration:.1f}s)")
+            logger.warning(f"Skipping invalid timestamp {ts}s (video duration: {duration:.1f}s)")
 
     # Sort timestamps
     valid_timestamps.sort()
 
-    print(f"Capturing {len(valid_timestamps)} screenshots...")
+    logger.info(f"Capturing {len(valid_timestamps)} screenshots from video")
 
     for i, timestamp in enumerate(valid_timestamps):
         # Generate filename with index and timestamp
@@ -208,11 +268,11 @@ def capture_screenshots(
                 quality=2 if format == "jpg" else 1
             )
             screenshots.append(screenshot)
-            print(f"  Captured: {filename}")
+            logger.debug(f"Captured screenshot: {filename}")
         except RuntimeError as e:
-            print(f"  Failed at {timestamp}s: {e}")
+            logger.error(f"Failed to capture frame at {timestamp}s: {e}")
 
-    print(f"Successfully captured {len(screenshots)} screenshots")
+    logger.info(f"Successfully captured {len(screenshots)}/{len(valid_timestamps)} screenshots")
 
     return screenshots
 
@@ -233,6 +293,21 @@ def create_thumbnail(
     Returns:
         Path to thumbnail
     """
+    # Validate input path for security
+    is_safe, error = is_safe_path(image_path)
+    if not is_safe:
+        raise ValueError(f"Invalid image path: {error}")
+
+    # Validate output path for security
+    output_result = validate_file_output_path(
+        output_path,
+        allowed_extensions=[".png", ".jpg", ".jpeg", ".gif", ".webp"],
+        create_parent_dirs=True
+    )
+    if not output_result.is_valid:
+        raise ValueError(f"Invalid output path: {output_result.error_message}")
+    output_path = output_result.sanitized_value
+
     with Image.open(image_path) as img:
         img.thumbnail(max_size, Image.Resampling.LANCZOS)
         img.save(output_path, quality=85, optimize=True)
@@ -254,22 +329,24 @@ def format_timestamp_filename(seconds: float) -> str:
 
 if __name__ == "__main__":
     import sys
+    from logger import init_logging
+    init_logging(verbose=True)
 
     if len(sys.argv) < 2:
-        print("Usage: python screenshotter.py <video_path> [timestamp1] [timestamp2] ...")
+        logger.error("Usage: python screenshotter.py <video_path> [timestamp1] [timestamp2] ...")
         sys.exit(1)
 
     video = sys.argv[1]
     timestamps = [float(t) for t in sys.argv[2:]] if len(sys.argv) > 2 else [0, 10, 30, 60]
 
-    print(f"Video: {video}")
-    print(f"Timestamps: {timestamps}")
+    logger.info(f"Video: {video}")
+    logger.info(f"Timestamps: {timestamps}")
 
     try:
         duration = get_video_duration(video)
         resolution = get_video_resolution(video)
-        print(f"Duration: {duration:.1f}s")
-        print(f"Resolution: {resolution[0]}x{resolution[1]}")
+        logger.info(f"Duration: {duration:.1f}s")
+        logger.info(f"Resolution: {resolution[0]}x{resolution[1]}")
 
         screenshots = capture_screenshots(
             video,
@@ -278,10 +355,10 @@ if __name__ == "__main__":
             prefix="frame"
         )
 
-        print("\nCaptured Screenshots:")
+        logger.info("Captured Screenshots:")
         for ss in screenshots:
-            print(f"  {ss.filepath} ({ss.width}x{ss.height})")
+            logger.info(f"  {ss.filepath} ({ss.width}x{ss.height})")
 
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"Error: {e}")
         sys.exit(1)

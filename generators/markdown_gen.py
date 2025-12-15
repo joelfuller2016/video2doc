@@ -4,10 +4,22 @@ Produces portable, version-controllable documentation with image references
 """
 
 import os
+import sys
 from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
 import shutil
+
+# Add parent directory to path for imports when running as module
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from logger import get_logger
+from utils.path_validator import (
+    is_safe_path,
+    validate_file_output_path,
+)
+
+# Module logger
+logger = get_logger(__name__)
 
 
 def generate_markdown(
@@ -34,6 +46,29 @@ def generate_markdown(
     Returns:
         Path to generated document
     """
+    logger.info(f"Generating Markdown document: {output_path}")
+    logger.debug(f"Document has {len(sections)} sections, {len(screenshots)} screenshots")
+
+    # Validate output path for security
+    output_result = validate_file_output_path(
+        output_path,
+        allowed_extensions=[".md"],
+        create_parent_dirs=True
+    )
+    if not output_result.is_valid:
+        raise ValueError(f"Invalid output path: {output_result.error_message}")
+    output_path = output_result.sanitized_value
+
+    # Validate screenshot paths for security
+    validated_screenshots = {}
+    for ts, screenshot_path in screenshots.items():
+        is_safe, error = is_safe_path(screenshot_path)
+        if is_safe and os.path.exists(screenshot_path):
+            validated_screenshots[ts] = screenshot_path
+        else:
+            logger.warning(f"Skipping invalid screenshot path at {ts}: {error or 'File not found'}")
+    screenshots = validated_screenshots
+
     output_path = Path(output_path)
     output_dir = output_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -112,6 +147,7 @@ def generate_markdown(
                     dest_filename = f"figure_{i:02d}_{src_path.name}"
                     dest_path = images_dir / dest_filename
                     shutil.copy2(src_path, dest_path)
+                    logger.debug(f"Copied image for section {i}: {dest_path}")
                     image_ref = f"{images_folder}/{dest_filename}"
                 else:
                     # Use absolute or relative path
@@ -146,6 +182,7 @@ def generate_markdown(
     # Write file
     content = "\n".join(lines)
     output_path.write_text(content, encoding="utf-8")
+    logger.info(f"Markdown document saved: {output_path}")
 
     return str(output_path)
 
@@ -176,6 +213,29 @@ def generate_markdown_with_transcript(
     Returns:
         Path to generated document
     """
+    logger.info(f"Generating Markdown with transcript: {output_path}")
+    logger.debug(f"Document has {len(sections)} sections, {len(screenshots)} screenshots, {len(transcript_segments)} transcript segments")
+
+    # Validate output path for security
+    output_result = validate_file_output_path(
+        output_path,
+        allowed_extensions=[".md"],
+        create_parent_dirs=True
+    )
+    if not output_result.is_valid:
+        raise ValueError(f"Invalid output path: {output_result.error_message}")
+    output_path = output_result.sanitized_value
+
+    # Validate screenshot paths for security
+    validated_screenshots = {}
+    for ts, screenshot_path in screenshots.items():
+        is_safe, error = is_safe_path(screenshot_path)
+        if is_safe and os.path.exists(screenshot_path):
+            validated_screenshots[ts] = screenshot_path
+        else:
+            logger.warning(f"Skipping invalid screenshot path at {ts}: {error or 'File not found'}")
+    screenshots = validated_screenshots
+
     output_path = Path(output_path)
     output_dir = output_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -288,11 +348,15 @@ def generate_markdown_with_transcript(
     # Write file
     content = "\n".join(lines)
     output_path.write_text(content, encoding="utf-8")
+    logger.info(f"Markdown with transcript saved: {output_path}")
 
     return str(output_path)
 
 
 if __name__ == "__main__":
+    from logger import init_logging
+    init_logging(verbose=True)
+
     # Test with mock data
     test_sections = [
         {
@@ -318,6 +382,6 @@ if __name__ == "__main__":
         copy_images=False
     )
 
-    print(f"Generated: {output}")
-    print("\nContent:")
-    print(Path(output).read_text())
+    logger.info(f"Generated: {output}")
+    logger.info("Content preview:")
+    logger.info(Path(output).read_text()[:500] + "...")

@@ -3,11 +3,18 @@ Configuration Module - Processing tier settings and application configuration
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from enum import Enum
 from pathlib import Path
 import json
 import os
+import re
+import threading
+
+from logger import get_logger
+
+# Module logger
+logger = get_logger(__name__)
 
 
 class WhisperModel(Enum):
@@ -273,6 +280,52 @@ class AppSettings:
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
+def validate_api_key_format(key: str) -> Tuple[bool, str]:
+    """
+    Validate Anthropic API key format.
+
+    Anthropic API keys have the format: sk-ant-api03-xxxxx...
+    - Start with 'sk-ant-'
+    - Followed by alphanumeric characters, hyphens, and underscores
+    - Approximately 80-130 characters total
+
+    Args:
+        key: The API key to validate
+
+    Returns:
+        Tuple of (is_valid, error_message)
+        error_message is empty string if valid
+    """
+    if not key:
+        return False, "API key is empty"
+
+    # Basic sanitization check - no whitespace or control characters
+    if key != key.strip():
+        return False, "API key contains leading/trailing whitespace"
+
+    if any(ord(c) < 32 for c in key):
+        return False, "API key contains invalid control characters"
+
+    # Check prefix - Anthropic keys start with sk-ant-
+    if not key.startswith("sk-ant-"):
+        return False, "API key must start with 'sk-ant-'"
+
+    # Check length (Anthropic keys are typically 80-130 chars)
+    if len(key) < 40:
+        return False, f"API key too short (minimum ~80 characters, got {len(key)})"
+
+    if len(key) > 200:
+        return False, f"API key too long (maximum ~130 characters, got {len(key)})"
+
+    # Check character set - alphanumeric, hyphens, underscores only
+    # After the prefix, the key should contain safe characters
+    key_body = key[7:]  # Remove 'sk-ant-' prefix
+    if not re.match(r'^[a-zA-Z0-9_-]+$', key_body):
+        return False, "API key contains invalid characters (only alphanumeric, hyphen, underscore allowed)"
+
+    return True, ""
+
+
 class SettingsManager:
     """
     Manages application settings with JSON persistence.
@@ -288,6 +341,9 @@ class SettingsManager:
         Args:
             settings_dir: Directory to store settings. Defaults to user's home directory.
         """
+        # Thread safety lock for file operations
+        self._lock = threading.Lock()
+
         if settings_dir:
             self.settings_dir = Path(settings_dir)
         else:
@@ -296,6 +352,8 @@ class SettingsManager:
         self.settings_file = self.settings_dir / self.DEFAULT_SETTINGS_FILE
         self.app_settings = AppSettings()
         self.processing_settings = ProcessingSettings()
+
+        logger.debug(f"Settings directory: {self.settings_dir}")
 
         # Ensure settings directory exists
         self.settings_dir.mkdir(parents=True, exist_ok=True)
@@ -307,46 +365,55 @@ class SettingsManager:
         """
         Load settings from JSON file.
 
+        Thread-safe: uses lock to prevent concurrent read/write conflicts.
+
         Returns:
             True if settings were loaded successfully, False otherwise.
         """
         if not self.settings_file.exists():
+            logger.debug(f"Settings file not found: {self.settings_file}")
             return False
 
-        try:
-            with open(self.settings_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+        with self._lock:
+            try:
+                with open(self.settings_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
 
-            if "app" in data:
-                self.app_settings = AppSettings.from_dict(data["app"])
-            if "processing" in data:
-                self.processing_settings = ProcessingSettings.from_dict(data["processing"])
+                if "app" in data:
+                    self.app_settings = AppSettings.from_dict(data["app"])
+                if "processing" in data:
+                    self.processing_settings = ProcessingSettings.from_dict(data["processing"])
 
-            return True
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"Warning: Could not load settings: {e}")
-            return False
+                logger.debug(f"Settings loaded from: {self.settings_file}")
+                return True
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(f"Could not load settings: {e}")
+                return False
 
     def save(self) -> bool:
         """
         Save settings to JSON file.
 
+        Thread-safe: uses lock to prevent concurrent read/write conflicts.
+
         Returns:
             True if settings were saved successfully, False otherwise.
         """
-        try:
-            data = {
-                "app": self.app_settings.to_dict(),
-                "processing": self.processing_settings.to_dict()
-            }
+        with self._lock:
+            try:
+                data = {
+                    "app": self.app_settings.to_dict(),
+                    "processing": self.processing_settings.to_dict()
+                }
 
-            with open(self.settings_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
+                with open(self.settings_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2)
 
-            return True
-        except IOError as e:
-            print(f"Warning: Could not save settings: {e}")
-            return False
+                logger.debug(f"Settings saved to: {self.settings_file}")
+                return True
+            except IOError as e:
+                logger.warning(f"Could not save settings: {e}")
+                return False
 
     def get_api_key(self) -> str:
         """Get the Claude API key."""
@@ -355,14 +422,28 @@ class SettingsManager:
             return self.app_settings.api_key
         return os.environ.get("ANTHROPIC_API_KEY", "")
 
-    def set_api_key(self, key: str) -> None:
-        """Set the Claude API key."""
+    def set_api_key(self, key: str, validate: bool = True) -> None:
+        """Set the Claude API key.
+
+        Args:
+            key: The API key to set
+            validate: If True, validate the key format before saving
+
+        Raises:
+            ValueError: If validate=True and key format is invalid
+        """
+        if validate and key:  # Only validate non-empty keys
+            is_valid, error_msg = validate_api_key_format(key)
+            if not is_valid:
+                raise ValueError(f"Invalid API key format: {error_msg}")
+
         self.app_settings.api_key = key
         self.save()
 
     def apply_quality_preset(self, preset: str) -> None:
         """Apply a quality preset to processing settings."""
         if preset not in QUALITY_PRESETS:
+            logger.warning(f"Unknown quality preset: {preset}")
             return
 
         preset_config = QUALITY_PRESETS[preset]
@@ -370,9 +451,11 @@ class SettingsManager:
         self.processing_settings.whisper_model = preset_config["whisper_model"]
         self.processing_settings.chunk_size_minutes = preset_config["chunk_size_minutes"]
         self.processing_settings.claude_strategy = preset_config["claude_strategy"]
+        logger.debug(f"Applied quality preset: {preset}")
 
     def reset_to_defaults(self) -> None:
         """Reset all settings to defaults."""
+        logger.info("Resetting all settings to defaults")
         api_key = self.app_settings.api_key  # Preserve API key
         self.app_settings = AppSettings()
         self.app_settings.api_key = api_key

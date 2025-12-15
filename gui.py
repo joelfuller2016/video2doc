@@ -13,8 +13,40 @@ import tempfile
 import shutil
 from pathlib import Path
 from datetime import datetime
+from dataclasses import dataclass
+from typing import Optional
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+
+
+@dataclass(frozen=True)
+class ProcessingSnapshot:
+    """
+    Thread-safe snapshot of all processing settings.
+    Captured in main thread before starting background processing.
+    This prevents race conditions from accessing tkinter variables in background thread.
+    """
+    video_path: str
+    output_dir: str
+    whisper_model: str
+    language: Optional[str]
+    format_docx: bool
+    format_pptx: bool
+    format_md: bool
+    include_transcript: bool
+    keep_screenshots: bool
+
+from logger import get_logger, init_logging
+from utils.input_validator import (
+    VIDEO_PATH_VALIDATOR,
+    OUTPUT_DIR_VALIDATOR,
+    WHISPER_MODEL_VALIDATOR,
+    PathValidator,
+    ValidationResult,
+)
+
+# Module logger
+logger = get_logger(__name__)
 
 # Import FrameNotes modules
 from transcriber import transcribe, get_full_transcript
@@ -24,10 +56,31 @@ from generators import generate_docx, generate_pptx, generate_markdown
 from generators.markdown_gen import generate_markdown_with_transcript
 
 
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize a filename to prevent path traversal attacks.
+    Removes dangerous characters and path components.
+    """
+    import re
+    # Remove path separators and parent directory references
+    filename = filename.replace('/', '_').replace('\\', '_').replace('..', '_')
+    # Remove null bytes and other control characters
+    filename = re.sub(r'[\x00-\x1f\x7f]', '', filename)
+    # Keep only safe characters: alphanumeric, space, dash, underscore, dot
+    filename = re.sub(r'[^\w\s\-.]', '_', filename)
+    # Collapse multiple underscores
+    filename = re.sub(r'_+', '_', filename)
+    # Strip leading/trailing whitespace and underscores
+    filename = filename.strip(' _')
+    # Ensure non-empty result
+    return filename if filename else 'video'
+
+
 class FrameNotesApp:
     """Main application class for FrameNotes GUI"""
 
     def __init__(self, root):
+        logger.info("Initializing FrameNotes GUI application")
         self.root = root
         self.root.title("FrameNotes - AI Documentation Generator")
         self.root.geometry("550x580")
@@ -38,6 +91,10 @@ class FrameNotesApp:
         self.cancel_event = threading.Event()
         self.progress_queue = queue.Queue()
         self.start_time = None
+        self._processing_thread = None  # Track thread for graceful shutdown
+
+        # Register graceful shutdown handler for window close
+        self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
         # Variables
         self.video_path = tk.StringVar()
@@ -52,10 +109,12 @@ class FrameNotesApp:
 
         self._create_widgets()
         self._check_api_key()
+        logger.debug("GUI initialization complete")
 
     def _check_api_key(self):
         """Check if API key is set"""
         if not os.environ.get("ANTHROPIC_API_KEY"):
+            logger.warning("ANTHROPIC_API_KEY environment variable not set")
             messagebox.showwarning(
                 "API Key Missing",
                 "ANTHROPIC_API_KEY environment variable not set.\n\n"
@@ -63,6 +122,8 @@ class FrameNotesApp:
                 "Windows: $env:ANTHROPIC_API_KEY = 'your-key'\n"
                 "Mac/Linux: export ANTHROPIC_API_KEY='your-key'"
             )
+        else:
+            logger.debug("API key found in environment")
 
     def _create_widgets(self):
         """Create all GUI widgets"""
@@ -238,6 +299,7 @@ class FrameNotesApp:
             filetypes=filetypes
         )
         if filepath:
+            logger.info(f"Video selected: {filepath}")
             self.video_path.set(filepath)
             self._update_video_info(filepath)
 
@@ -246,17 +308,36 @@ class FrameNotesApp:
                 self.output_dir.set(str(Path(filepath).parent))
 
     def _update_video_info(self, filepath):
-        """Update video info label"""
+        """Update video info label - runs FFmpeg probe in background thread to avoid UI freeze"""
         try:
             path = Path(filepath)
             size_mb = path.stat().st_size / (1024 * 1024)
-            duration = get_video_duration(filepath)
 
-            self.video_info_label.config(
-                text=f"{path.name} ({size_mb:.1f} MB, {duration:.0f}s)"
-            )
+            # Show loading state immediately
+            self.video_info_label.config(text=f"{path.name} ({size_mb:.1f} MB, loading...)")
+
+            # Run FFmpeg probe in background thread to avoid blocking main thread
+            def get_duration_async():
+                try:
+                    duration = get_video_duration(filepath)
+                    # Schedule UI update on main thread
+                    self.root.after(0, lambda: self._update_video_duration(path.name, size_mb, duration))
+                except Exception as e:
+                    logger.error(f"Error getting video duration: {e}")
+                    self.root.after(0, lambda: self.video_info_label.config(
+                        text=f"{path.name} ({size_mb:.1f} MB)"
+                    ))
+
+            thread = threading.Thread(target=get_duration_async, daemon=True)
+            thread.start()
         except Exception as e:
+            logger.error(f"Error reading video info: {e}")
             self.video_info_label.config(text=f"Error reading video: {e}")
+
+    def _update_video_duration(self, name, size_mb, duration):
+        """Update video info label with duration (called from main thread)"""
+        logger.debug(f"Video info: {name}, {size_mb:.1f} MB, {duration:.0f}s")
+        self.video_info_label.config(text=f"{name} ({size_mb:.1f} MB, {duration:.0f}s)")
 
     def _browse_output(self):
         """Open dialog to select output directory"""
@@ -274,23 +355,44 @@ class FrameNotesApp:
         self.time_label.config(text="Elapsed: --:--")
 
     def _validate_inputs(self):
-        """Validate form inputs before processing"""
-        if not self.video_path.get():
+        """Validate form inputs before processing using secure validators."""
+        # Validate video path using secure PathValidator
+        video_path = self.video_path.get()
+        if not video_path:
             messagebox.showerror("Error", "Please select a video file.")
             return False
 
-        if not Path(self.video_path.get()).exists():
-            messagebox.showerror("Error", "Selected video file does not exist.")
+        video_result = VIDEO_PATH_VALIDATOR.validate(video_path)
+        if not video_result.is_valid:
+            logger.warning(f"Video path validation failed: {video_result.error_message}")
+            messagebox.showerror("Error", video_result.error_message)
             return False
 
-        if not self.output_dir.get():
+        # Validate output directory
+        output_dir = self.output_dir.get()
+        if not output_dir:
             messagebox.showerror("Error", "Please select an output folder.")
             return False
 
+        output_result = OUTPUT_DIR_VALIDATOR.validate(output_dir)
+        if not output_result.is_valid:
+            logger.warning(f"Output directory validation failed: {output_result.error_message}")
+            messagebox.showerror("Error", output_result.error_message)
+            return False
+
+        # Validate whisper model selection
+        model_result = WHISPER_MODEL_VALIDATOR.validate(self.model_var.get())
+        if not model_result.is_valid:
+            logger.warning(f"Model validation failed: {model_result.error_message}")
+            messagebox.showerror("Error", model_result.error_message)
+            return False
+
+        # Validate at least one output format selected
         if not any([self.format_docx.get(), self.format_pptx.get(), self.format_md.get()]):
             messagebox.showerror("Error", "Please select at least one output format.")
             return False
 
+        # Validate API key is set
         if not os.environ.get("ANTHROPIC_API_KEY"):
             messagebox.showerror(
                 "Error",
@@ -303,8 +405,19 @@ class FrameNotesApp:
 
     def _start_generation(self):
         """Start the documentation generation process"""
+        # Guard against concurrent processing - prevent duplicate generation attempts
+        if self.processing:
+            logger.warning("Generation already in progress, ignoring duplicate request")
+            return
+
         if not self._validate_inputs():
             return
+
+        logger.info("Starting documentation generation")
+        logger.info(f"  Video: {self.video_path.get()}")
+        logger.info(f"  Output: {self.output_dir.get()}")
+        logger.info(f"  Formats: DOCX={self.format_docx.get()}, PPTX={self.format_pptx.get()}, MD={self.format_md.get()}")
+        logger.info(f"  Model: {self.model_var.get()}, Language: {self.language_var.get()}")
 
         self.processing = True
         self.cancel_event.clear()
@@ -316,17 +429,62 @@ class FrameNotesApp:
         self.clear_btn.config(state=tk.DISABLED)
         self.progress_bar['value'] = 0
 
-        # Start processing thread
-        thread = threading.Thread(target=self._process_video, daemon=True)
-        thread.start()
+        # THREAD SAFETY: Snapshot all settings in main thread before background processing
+        # This prevents race conditions from accessing tkinter variables in background thread
+        language_val = self.language_var.get()
+        snapshot = ProcessingSnapshot(
+            video_path=self.video_path.get(),
+            output_dir=self.output_dir.get(),
+            whisper_model=self.model_var.get(),
+            language=None if language_val == "auto" else language_val,
+            format_docx=self.format_docx.get(),
+            format_pptx=self.format_pptx.get(),
+            format_md=self.format_md.get(),
+            include_transcript=self.include_transcript.get(),
+            keep_screenshots=self.keep_screenshots.get()
+        )
+
+        # Start processing thread with snapshot
+        # Store thread reference for graceful shutdown
+        self._processing_thread = threading.Thread(target=self._process_video, args=(snapshot,), daemon=True)
+        self._processing_thread.start()
 
         # Start progress polling
         self._poll_progress()
 
     def _cancel_generation(self):
         """Cancel the ongoing generation"""
+        logger.warning("User requested cancellation")
         self.cancel_event.set()
         self.status_label.config(text="Cancelling...")
+
+    def _on_window_close(self):
+        """Handle graceful shutdown when window is closed.
+
+        Ensures background threads complete or timeout gracefully to prevent:
+        - Orphaned temp files
+        - Corrupted output files from mid-write interruption
+        - Resource leaks
+        """
+        if self.processing and self._processing_thread and self._processing_thread.is_alive():
+            logger.info("Window close requested during processing - initiating graceful shutdown")
+
+            # Signal thread to stop
+            self.cancel_event.set()
+
+            # Wait for thread to finish with timeout
+            shutdown_timeout = 5.0  # seconds
+            self._processing_thread.join(timeout=shutdown_timeout)
+
+            if self._processing_thread.is_alive():
+                logger.warning(f"Processing thread did not stop within {shutdown_timeout}s timeout")
+            else:
+                logger.info("Processing thread stopped gracefully")
+        else:
+            logger.debug("No active processing - closing immediately")
+
+        # Destroy the window
+        self.root.destroy()
 
     def _poll_progress(self):
         """Poll progress queue and update UI"""
@@ -358,15 +516,22 @@ class FrameNotesApp:
         if self.processing:
             self.root.after(100, self._poll_progress)
 
-    def _process_video(self):
-        """Process video in background thread"""
-        video_path = self.video_path.get()
-        output_dir = Path(self.output_dir.get())
-        video_name = Path(video_path).stem
+    def _process_video(self, snapshot: ProcessingSnapshot):
+        """Process video in background thread.
 
+        Args:
+            snapshot: Thread-safe snapshot of all settings captured in main thread.
+                     Never access tkinter variables (self.xxx.get()) from this method.
+        """
+        video_path = snapshot.video_path
+        output_dir = Path(snapshot.output_dir)
+        video_name = sanitize_filename(Path(video_path).stem)
+
+        logger.debug(f"Processing video in background thread: {video_name}")
         temp_dir = tempfile.mkdtemp(prefix="framenotes_gui_")
         screenshots_dir = Path(temp_dir) / "screenshots"
         screenshots_dir.mkdir(parents=True, exist_ok=True)
+        logger.debug(f"Using temp directory: {temp_dir}")
 
         try:
             # Step 1: Transcribe (0-30%)
@@ -380,8 +545,8 @@ class FrameNotesApp:
                 self.progress_queue.put({'type': 'cancelled'})
                 return
 
-            language = None if self.language_var.get() == "auto" else self.language_var.get()
-            segments = transcribe(video_path, model_size=self.model_var.get(), language=language)
+            # Use settings from snapshot (thread-safe)
+            segments = transcribe(video_path, model_size=snapshot.whisper_model, language=snapshot.language)
 
             self.progress_queue.put({
                 'type': 'progress',
@@ -447,7 +612,8 @@ class FrameNotesApp:
             sections = analysis.get("sections", [])
             generated_files = []
 
-            if self.format_docx.get():
+            # Use snapshot values for thread safety
+            if snapshot.format_docx:
                 self.progress_queue.put({
                     'type': 'progress',
                     'value': 75,
@@ -457,7 +623,7 @@ class FrameNotesApp:
                 generate_docx(title, summary, sections, screenshots_map, docx_path)
                 generated_files.append(docx_path)
 
-            if self.format_pptx.get():
+            if snapshot.format_pptx:
                 self.progress_queue.put({
                     'type': 'progress',
                     'value': 82,
@@ -467,14 +633,14 @@ class FrameNotesApp:
                 generate_pptx(title, summary, sections, screenshots_map, pptx_path)
                 generated_files.append(pptx_path)
 
-            if self.format_md.get():
+            if snapshot.format_md:
                 self.progress_queue.put({
                     'type': 'progress',
                     'value': 90,
                     'status': 'Generating Markdown document...'
                 })
                 md_path = str(output_dir / f"{video_name}_documentation.md")
-                if self.include_transcript.get():
+                if snapshot.include_transcript:
                     generate_markdown_with_transcript(
                         title, summary, sections, screenshots_map,
                         segments, md_path, copy_images=True
@@ -486,8 +652,8 @@ class FrameNotesApp:
                     )
                 generated_files.append(md_path)
 
-            # Copy screenshots if requested
-            if self.keep_screenshots.get() and screenshots_map:
+            # Copy screenshots if requested (use snapshot for thread safety)
+            if snapshot.keep_screenshots and screenshots_map:
                 ss_output_dir = output_dir / f"{video_name}_screenshots"
                 ss_output_dir.mkdir(exist_ok=True)
                 for ss_path in screenshots_map.values():
@@ -506,17 +672,19 @@ class FrameNotesApp:
             })
 
         except Exception as e:
+            logger.error(f"Error during video processing: {e}")
             self.progress_queue.put({
                 'type': 'error',
                 'message': str(e)
             })
         finally:
-            # Cleanup temp directory
-            if not self.keep_screenshots.get():
+            # Cleanup temp directory (use snapshot for thread safety)
+            if not snapshot.keep_screenshots:
                 try:
                     shutil.rmtree(temp_dir, ignore_errors=True)
-                except Exception:
-                    pass
+                    logger.debug(f"Cleaned up temp directory: {temp_dir}")
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to clean up temp directory: {cleanup_error}")
 
     def _on_complete(self, files):
         """Handle successful completion"""
@@ -527,6 +695,10 @@ class FrameNotesApp:
 
         elapsed = int(time.time() - self.start_time)
         mins, secs = divmod(elapsed, 60)
+
+        logger.info(f"Documentation generation completed in {mins}m {secs}s")
+        for f in files:
+            logger.info(f"  Generated: {f}")
 
         file_list = "\n".join([f"  - {f}" for f in files])
         messagebox.showinfo(
@@ -544,6 +716,7 @@ class FrameNotesApp:
         self.clear_btn.config(state=tk.NORMAL)
         self.status_label.config(text=f"Error: {message[:50]}...")
 
+        logger.error(f"Generation failed: {message}")
         messagebox.showerror("Error", f"Generation failed:\n\n{message}")
 
     def _on_cancelled(self):
@@ -554,10 +727,15 @@ class FrameNotesApp:
         self.clear_btn.config(state=tk.NORMAL)
         self.status_label.config(text="Generation cancelled")
         self.progress_bar['value'] = 0
+        logger.info("Generation cancelled by user")
 
 
 def main():
     """Main entry point for GUI"""
+    # Initialize logging for GUI mode
+    init_logging(verbose=False)
+    logger.info("Starting FrameNotes GUI application")
+
     root = tk.Tk()
 
     # Set icon if available
@@ -569,7 +747,9 @@ def main():
         pass
 
     app = FrameNotesApp(root)
+    logger.debug("Entering main event loop")
     root.mainloop()
+    logger.info("FrameNotes GUI application closed")
 
 
 if __name__ == "__main__":

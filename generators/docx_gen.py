@@ -4,9 +4,21 @@ Produces professional instruction manuals with embedded screenshots
 """
 
 import os
+import sys
 from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
+
+# Add parent directory to path for imports when running as module
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from logger import get_logger
+from utils.path_validator import (
+    is_safe_path,
+    validate_file_output_path,
+)
+
+# Module logger
+logger = get_logger(__name__)
 
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
@@ -57,6 +69,29 @@ def generate_docx(
     Returns:
         Path to generated document
     """
+    logger.info(f"Generating DOCX document: {output_path}")
+    logger.debug(f"Document has {len(sections)} sections, {len(screenshots)} screenshots")
+
+    # Validate output path for security
+    output_result = validate_file_output_path(
+        output_path,
+        allowed_extensions=[".docx"],
+        create_parent_dirs=True
+    )
+    if not output_result.is_valid:
+        raise ValueError(f"Invalid output path: {output_result.error_message}")
+    output_path = output_result.sanitized_value
+
+    # Validate screenshot paths for security
+    validated_screenshots = {}
+    for ts, screenshot_path in screenshots.items():
+        is_safe, error = is_safe_path(screenshot_path)
+        if is_safe and os.path.exists(screenshot_path):
+            validated_screenshots[ts] = screenshot_path
+        else:
+            logger.warning(f"Skipping invalid screenshot path at {ts}: {error or 'File not found'}")
+    screenshots = validated_screenshots
+
     doc = Document()
 
     # Set document properties
@@ -100,6 +135,7 @@ def generate_docx(
     doc.add_page_break()
 
     # Add sections
+    logger.debug("Adding document sections...")
     for i, section in enumerate(sections, 1):
         section_title = section.get("title", f"Section {i}")
         section_content = section.get("content", "")
@@ -128,25 +164,30 @@ def generate_docx(
                     screenshot_path = screenshots[closest_ts]
 
             if screenshot_path and os.path.exists(screenshot_path):
-                # Add image
-                doc.add_paragraph()  # Spacer before image
+                try:
+                    logger.debug(f"Embedding screenshot for section {i}: {screenshot_path}")
+                    # Add image
+                    doc.add_paragraph()  # Spacer before image
 
-                # Center the image
-                img_para = doc.add_paragraph()
-                img_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                run = img_para.add_run()
-                run.add_picture(screenshot_path, width=Inches(image_width))
+                    # Center the image
+                    img_para = doc.add_paragraph()
+                    img_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    run = img_para.add_run()
+                    run.add_picture(screenshot_path, width=Inches(image_width))
 
-                # Add caption
-                if screenshot_reason:
-                    caption = doc.add_paragraph()
-                    caption_run = caption.add_run(f"Figure {i}: {screenshot_reason}")
-                    caption_run.font.size = Pt(10)
-                    caption_run.font.italic = True
-                    caption_run.font.color.rgb = RGBColor(100, 100, 100)
-                    caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    # Add caption
+                    if screenshot_reason:
+                        caption = doc.add_paragraph()
+                        caption_run = caption.add_run(f"Figure {i}: {screenshot_reason}")
+                        caption_run.font.size = Pt(10)
+                        caption_run.font.italic = True
+                        caption_run.font.color.rgb = RGBColor(100, 100, 100)
+                        caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-                doc.add_paragraph()  # Spacer after image
+                    doc.add_paragraph()  # Spacer after image
+
+                except Exception as e:
+                    logger.warning(f"Failed to embed image for section {i}: {e}. Skipping image.")
 
         # Add some spacing between sections
         doc.add_paragraph()
@@ -171,11 +212,15 @@ def generate_docx(
 
     # Save document
     doc.save(str(output_path))
+    logger.info(f"DOCX document saved: {output_path}")
 
     return str(output_path)
 
 
 if __name__ == "__main__":
+    from logger import init_logging
+    init_logging(verbose=True)
+
     # Test with mock data
     test_sections = [
         {
@@ -207,4 +252,4 @@ if __name__ == "__main__":
         output_path="./test_output.docx"
     )
 
-    print(f"Generated: {output}")
+    logger.info(f"Generated: {output}")

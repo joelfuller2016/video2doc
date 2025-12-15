@@ -13,6 +13,19 @@ from dataclasses import dataclass
 
 from faster_whisper import WhisperModel
 
+from logger import get_logger, ProcessingLogger, LogContext
+from utils.ffmpeg_builder import (
+    FFmpegCommandBuilder,
+    FFmpegError,
+    FFmpegNotFoundError,
+    FFmpegTimeoutError,
+    FFmpegExecutionError,
+    PathValidationError
+)
+
+# Module logger
+logger = get_logger(__name__)
+
 
 @dataclass
 class TranscriptSegment:
@@ -63,30 +76,31 @@ class ChunkedTranscriber:
         self.overlap_seconds = overlap_seconds
         self.use_gpu = use_gpu and self._check_gpu()
         self.model = None
-        self._ffmpeg_path = self._find_ffmpeg()
+        self._ffmpeg_builder = self._create_builder()
 
     def _check_gpu(self) -> bool:
         """Check if CUDA GPU is available"""
         try:
             import torch
-            return torch.cuda.is_available()
+            gpu_available = torch.cuda.is_available()
+            if gpu_available:
+                logger.info(f"CUDA GPU detected: {torch.cuda.get_device_name(0)}")
+            else:
+                logger.debug("No CUDA GPU available, will use CPU")
+            return gpu_available
         except ImportError:
+            logger.debug("PyTorch not installed, GPU acceleration unavailable")
             return False
 
-    def _find_ffmpeg(self) -> Optional[str]:
-        """Find FFmpeg executable"""
-        import shutil
-        ffmpeg = shutil.which("ffmpeg")
-        if ffmpeg:
-            return ffmpeg
-        common_paths = [
-            r"C:\ffmpeg\bin\ffmpeg.exe",
-            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
-        ]
-        for path in common_paths:
-            if os.path.exists(path):
-                return path
-        return None
+    def _create_builder(self) -> FFmpegCommandBuilder:
+        """Create FFmpegCommandBuilder instance"""
+        try:
+            builder = FFmpegCommandBuilder()
+            logger.debug(f"FFmpegCommandBuilder initialized")
+            return builder
+        except FFmpegNotFoundError as e:
+            logger.error(f"FFmpeg not found: {e}")
+            raise
 
     @property
     def gpu_available(self) -> bool:
@@ -96,6 +110,7 @@ class ChunkedTranscriber:
     def _load_model(self, model_size: str):
         """Load Whisper model with appropriate settings"""
         if self.model is not None:
+            logger.debug(f"Whisper model already loaded, skipping")
             return
 
         # Determine compute settings based on GPU availability
@@ -106,27 +121,35 @@ class ChunkedTranscriber:
             device = "cpu"
             compute_type = "int8"  # Good balance for CPU
 
-        print(f"Loading Whisper model ({model_size}) on {device}...")
-        self.model = WhisperModel(
-            model_size,
-            device=device,
-            compute_type=compute_type
-        )
+        logger.info(f"Loading Whisper model ({model_size}) on {device} with {compute_type}...")
+        try:
+            self.model = WhisperModel(
+                model_size,
+                device=device,
+                compute_type=compute_type
+            )
+            logger.info(f"Whisper model loaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to load Whisper model: {e}")
+            raise
 
     def _get_audio_duration(self, audio_path: str) -> float:
         """Get duration of audio file using FFprobe"""
-        cmd = [
-            self._ffmpeg_path.replace("ffmpeg", "ffprobe"),
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_format",
-            audio_path
-        ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            data = json.loads(result.stdout)
-            return float(data.get("format", {}).get("duration", 0))
-        except Exception:
+            logger.debug(f"Getting audio duration for: {audio_path}")
+            cmd = self._ffmpeg_builder.get_duration(audio_path, timeout=30)
+            result = cmd.execute()
+            duration = float(result.stdout.strip())
+            logger.debug(f"Audio duration: {duration:.2f} seconds")
+            return duration
+        except PathValidationError as e:
+            logger.warning(f"Invalid audio path: {e}")
+            return 0
+        except FFmpegTimeoutError:
+            logger.warning("FFprobe timed out getting audio duration")
+            return 0
+        except (FFmpegExecutionError, FFmpegNotFoundError, ValueError) as e:
+            logger.warning(f"Failed to get audio duration: {e}")
             return 0
 
     def _extract_audio_chunk(
@@ -137,57 +160,61 @@ class ChunkedTranscriber:
         output_path: str
     ) -> str:
         """Extract a chunk of audio from video"""
-        cmd = [
-            self._ffmpeg_path,
-            "-ss", str(start_time),
-            "-i", str(video_path),
-            "-t", str(duration),
-            "-vn",
-            "-acodec", "pcm_s16le",
-            "-ar", "16000",
-            "-ac", "1",
-            "-y",
-            output_path
-        ]
+        logger.debug(f"Extracting audio chunk: start={start_time:.2f}s, duration={duration:.2f}s")
 
         try:
-            subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
+            cmd = self._ffmpeg_builder.extract_audio_chunk(
+                video_path,
+                output_path,
+                start_time=start_time,
+                duration=duration,
+                sample_rate=16000,
+                channels=1,
                 timeout=300
             )
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"FFmpeg audio extraction failed: {e.stderr}")
+            cmd.execute()
+            logger.debug(f"Audio chunk extracted to: {output_path}")
+        except PathValidationError as e:
+            logger.error(f"Invalid path for audio chunk extraction: {e}")
+            raise RuntimeError(f"Invalid path: {e}")
+        except FFmpegTimeoutError:
+            logger.error(f"Audio chunk extraction timed out after 300s")
+            raise RuntimeError("Audio chunk extraction timed out")
+        except FFmpegNotFoundError as e:
+            logger.error(str(e))
+            raise RuntimeError(str(e))
+        except FFmpegExecutionError as e:
+            logger.error(f"FFmpeg audio chunk extraction failed: {e}")
+            raise RuntimeError(f"FFmpeg audio extraction failed: {e}")
 
         return output_path
 
     def _extract_full_audio(self, video_path: str, output_path: str) -> str:
         """Extract full audio from video"""
-        cmd = [
-            self._ffmpeg_path,
-            "-i", str(video_path),
-            "-vn",
-            "-acodec", "pcm_s16le",
-            "-ar", "16000",
-            "-ac", "1",
-            "-y",
-            output_path
-        ]
+        logger.info(f"Extracting full audio from: {Path(video_path).name}")
 
         try:
-            subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
+            cmd = self._ffmpeg_builder.extract_audio(
+                video_path,
+                output_path,
+                sample_rate=16000,
+                channels=1,
                 timeout=600
             )
-        except subprocess.TimeoutExpired:
+            cmd.execute()
+            logger.info(f"Audio extraction complete: {output_path}")
+        except PathValidationError as e:
+            logger.error(f"Invalid path for audio extraction: {e}")
+            raise RuntimeError(f"Invalid path: {e}")
+        except FFmpegTimeoutError:
+            logger.error(f"Audio extraction timed out after 600s for: {video_path}")
             raise RuntimeError("Audio extraction timed out")
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"FFmpeg audio extraction failed: {e.stderr}")
+        except FFmpegNotFoundError as e:
+            logger.error(str(e))
+            raise RuntimeError(str(e))
+        except FFmpegExecutionError as e:
+            logger.error(f"FFmpeg audio extraction failed: {e}")
+            raise RuntimeError(f"FFmpeg audio extraction failed: {e}")
 
         return output_path
 
@@ -272,8 +299,10 @@ class ChunkedTranscriber:
             List of TranscriptSegment objects with timestamps
         """
         video_path = Path(video_path)
+        logger.info(f"Starting transcription for: {video_path.name}")
 
         if not video_path.exists():
+            logger.error(f"Video file not found: {video_path}")
             raise FileNotFoundError(f"Video file not found: {video_path}")
 
         # Load model
@@ -281,6 +310,7 @@ class ChunkedTranscriber:
 
         # Create temp directory for audio chunks
         temp_dir = tempfile.mkdtemp(prefix="framenotes_audio_")
+        logger.debug(f"Created temp directory: {temp_dir}")
 
         try:
             # Extract full audio first
@@ -292,9 +322,11 @@ class ChunkedTranscriber:
 
             # Get audio duration
             duration = self._get_audio_duration(full_audio_path)
+            logger.info(f"Total audio duration: {duration:.2f}s ({duration/60:.1f} minutes)")
 
             if not enable_chunking or duration < self.chunk_size_seconds * 1.5:
                 # Process without chunking for short videos
+                logger.info("Processing without chunking (short video)")
                 return self._transcribe_single(
                     full_audio_path,
                     language,
@@ -302,6 +334,7 @@ class ChunkedTranscriber:
                 )
 
             # Process with chunking
+            logger.info("Processing with chunking (large video)")
             return self._transcribe_chunked(
                 full_audio_path,
                 duration,
@@ -315,8 +348,9 @@ class ChunkedTranscriber:
             try:
                 import shutil
                 shutil.rmtree(temp_dir, ignore_errors=True)
-            except Exception:
-                pass
+                logger.debug(f"Cleaned up temp directory: {temp_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup temp directory: {e}")
 
     def _transcribe_single(
         self,
@@ -325,32 +359,38 @@ class ChunkedTranscriber:
         progress_callback: Optional[Callable]
     ) -> List[TranscriptSegment]:
         """Transcribe audio without chunking"""
+        logger.debug("Starting single-pass transcription")
         if progress_callback:
             progress_callback(0, 1, "Transcribing audio...")
 
-        segments_generator, info = self.model.transcribe(
-            audio_path,
-            language=language,
-            beam_size=5,
-            word_timestamps=False,
-            vad_filter=True
-        )
+        try:
+            segments_generator, info = self.model.transcribe(
+                audio_path,
+                language=language,
+                beam_size=5,
+                word_timestamps=False,
+                vad_filter=True
+            )
 
-        segments = []
-        for segment in segments_generator:
-            segments.append(TranscriptSegment(
-                start=segment.start,
-                end=segment.end,
-                text=segment.text.strip()
-            ))
+            segments = []
+            for segment in segments_generator:
+                segments.append(TranscriptSegment(
+                    start=segment.start,
+                    end=segment.end,
+                    text=segment.text.strip()
+                ))
 
-        if progress_callback:
-            progress_callback(1, 1, f"Transcribed {len(segments)} segments")
+            if progress_callback:
+                progress_callback(1, 1, f"Transcribed {len(segments)} segments")
 
-        print(f"Detected language: {info.language} (prob: {info.language_probability:.2f})")
-        print(f"Transcribed {len(segments)} segments")
+            logger.info(f"Detected language: {info.language} (probability: {info.language_probability:.2f})")
+            logger.info(f"Transcription complete: {len(segments)} segments")
 
-        return segments
+            return segments
+
+        except Exception as e:
+            logger.error(f"Transcription failed: {e}")
+            raise
 
     def _transcribe_chunked(
         self,
@@ -387,12 +427,13 @@ class ChunkedTranscriber:
             chunk_index += 1
 
         total_chunks = len(chunks)
-        print(f"Processing {total_chunks} audio chunks...")
+        logger.info(f"Processing {total_chunks} audio chunks (chunk size: {self.chunk_size_seconds}s, overlap: {self.overlap_seconds}s)")
 
         all_segments = []
         detected_language = language
 
         for chunk in chunks:
+            logger.debug(f"Processing chunk {chunk.index + 1}/{total_chunks}: {chunk.start_time:.2f}s - {chunk.end_time:.2f}s")
             if progress_callback:
                 progress_callback(
                     chunk.index + 1,
@@ -410,50 +451,60 @@ class ChunkedTranscriber:
             )
 
             # Transcribe chunk
-            segments_generator, info = self.model.transcribe(
-                chunk.audio_path,
-                language=detected_language,
-                beam_size=5,
-                word_timestamps=False,
-                vad_filter=True
-            )
+            try:
+                segments_generator, info = self.model.transcribe(
+                    chunk.audio_path,
+                    language=detected_language,
+                    beam_size=5,
+                    word_timestamps=False,
+                    vad_filter=True
+                )
 
-            # Use detected language for subsequent chunks
-            if detected_language is None:
-                detected_language = info.language
-                print(f"Detected language: {detected_language}")
+                # Use detected language for subsequent chunks
+                if detected_language is None:
+                    detected_language = info.language
+                    logger.info(f"Detected language: {detected_language}")
 
-            # Adjust timestamps to global timeline
-            for segment in segments_generator:
-                # Calculate offset for this chunk
-                if chunk.index > 0:
-                    # Account for overlap
-                    offset = chunk.start_time
-                else:
-                    offset = 0
+                # Adjust timestamps to global timeline
+                chunk_segments = 0
+                for segment in segments_generator:
+                    # Calculate offset for this chunk
+                    if chunk.index > 0:
+                        # Account for overlap
+                        offset = chunk.start_time
+                    else:
+                        offset = 0
 
-                global_start = offset + segment.start
-                global_end = offset + segment.end
+                    global_start = offset + segment.start
+                    global_end = offset + segment.end
 
-                all_segments.append(TranscriptSegment(
-                    start=global_start,
-                    end=global_end,
-                    text=segment.text.strip()
-                ))
+                    all_segments.append(TranscriptSegment(
+                        start=global_start,
+                        end=global_end,
+                        text=segment.text.strip()
+                    ))
+                    chunk_segments += 1
+
+                logger.debug(f"Chunk {chunk.index + 1} produced {chunk_segments} segments")
+
+            except Exception as e:
+                logger.error(f"Failed to transcribe chunk {chunk.index + 1}: {e}")
+                raise
 
             # Cleanup chunk file
             try:
                 os.remove(chunk.audio_path)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to cleanup chunk file: {e}")
 
         # Merge overlapping segments
+        logger.debug(f"Merging {len(all_segments)} raw segments...")
         merged_segments = self._merge_overlapping_segments(all_segments)
 
         if progress_callback:
             progress_callback(total_chunks, total_chunks, f"Transcribed {len(merged_segments)} segments")
 
-        print(f"Transcribed {len(merged_segments)} segments (from {len(all_segments)} raw)")
+        logger.info(f"Transcription complete: {len(merged_segments)} segments (merged from {len(all_segments)} raw)")
 
         return merged_segments
 
@@ -524,6 +575,10 @@ def transcribe(
 
 if __name__ == "__main__":
     import sys
+    from logger import init_logging
+
+    # Initialize logging for standalone testing
+    init_logging(verbose=True)
 
     if len(sys.argv) > 1:
         video = sys.argv[1]
@@ -535,10 +590,10 @@ if __name__ == "__main__":
             use_gpu=True
         )
 
-        print(f"GPU Available: {transcriber.gpu_available}")
+        logger.info(f"GPU Available: {transcriber.gpu_available}")
 
         def progress(current, total, status):
-            print(f"[{current}/{total}] {status}")
+            logger.debug(f"[{current}/{total}] {status}")
 
         segments = transcriber.transcribe(
             video,
@@ -547,7 +602,9 @@ if __name__ == "__main__":
             enable_chunking=True
         )
 
-        print("\n" + "=" * 50)
-        print("TRANSCRIPT:")
-        print("=" * 50)
+        logger.info("=" * 50)
+        logger.info("TRANSCRIPT:")
+        logger.info("=" * 50)
         print(get_full_transcript(segments))
+    else:
+        logger.error("Usage: python transcriber_v2.py <video_path>")

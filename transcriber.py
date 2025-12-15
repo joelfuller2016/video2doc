@@ -12,6 +12,26 @@ from dataclasses import dataclass
 
 from faster_whisper import WhisperModel
 
+from utils.ffmpeg_builder import (
+    FFmpegCommandBuilder,
+    FFmpegError,
+    FFmpegNotFoundError,
+    FFmpegTimeoutError,
+    FFmpegExecutionError,
+    PathValidationError
+)
+
+# Shared FFmpeg command builder instance
+_ffmpeg_builder: Optional[FFmpegCommandBuilder] = None
+
+
+def _get_builder() -> FFmpegCommandBuilder:
+    """Get or create the shared FFmpegCommandBuilder instance."""
+    global _ffmpeg_builder
+    if _ffmpeg_builder is None:
+        _ffmpeg_builder = FFmpegCommandBuilder()
+    return _ffmpeg_builder
+
 
 @dataclass
 class TranscriptSegment:
@@ -28,6 +48,26 @@ class TranscriptSegment:
         }
 
 
+def _check_gpu_available() -> bool:
+    """
+    Check if CUDA GPU is available for Whisper acceleration.
+
+    Returns:
+        True if CUDA GPU is available, False otherwise.
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            print(f"GPU detected: {gpu_name}")
+            return True
+        return False
+    except ImportError:
+        return False
+    except Exception:
+        return False
+
+
 def extract_audio(video_path: str, output_path: Optional[str] = None) -> str:
     """
     Extract audio from video file using FFmpeg.
@@ -38,43 +78,37 @@ def extract_audio(video_path: str, output_path: Optional[str] = None) -> str:
 
     Returns:
         Path to the extracted audio file
+
+    Raises:
+        FileNotFoundError: If video file not found
+        RuntimeError: If FFmpeg fails or path validation fails
     """
-    video_path = Path(video_path)
-
-    if not video_path.exists():
-        raise FileNotFoundError(f"Video file not found: {video_path}")
-
-    # Create temp file if no output path specified
+    # Create secure temp file if no output path specified
+    # Using mkstemp for atomic creation with unpredictable name to prevent race conditions
     if output_path is None:
-        temp_dir = tempfile.gettempdir()
-        output_path = os.path.join(temp_dir, f"{video_path.stem}_audio.wav")
-
-    # FFmpeg command to extract audio as WAV (16kHz mono - optimal for Whisper)
-    cmd = [
-        "ffmpeg",
-        "-i", str(video_path),
-        "-vn",                    # No video
-        "-acodec", "pcm_s16le",   # PCM 16-bit
-        "-ar", "16000",           # 16kHz sample rate
-        "-ac", "1",               # Mono
-        "-y",                     # Overwrite output
-        output_path
-    ]
+        fd, output_path = tempfile.mkstemp(suffix=".wav", prefix="framenotes_audio_")
+        os.close(fd)  # Close fd since FFmpeg will write to this path
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=600  # 10 minute timeout for large videos
+        builder = _get_builder()
+        cmd = builder.extract_audio(
+            str(video_path),
+            output_path,
+            sample_rate=16000,  # Optimal for Whisper
+            channels=1,         # Mono
+            timeout=600         # 10 minute timeout for large videos
         )
-    except subprocess.TimeoutExpired:
+        cmd.execute()
+    except PathValidationError as e:
+        if "does not exist" in str(e):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+        raise RuntimeError(f"Invalid path: {e}")
+    except FFmpegTimeoutError:
         raise RuntimeError("FFmpeg audio extraction timed out. Video may be too large or corrupt.")
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"FFmpeg audio extraction failed: {e.stderr}")
-    except FileNotFoundError:
-        raise RuntimeError("FFmpeg not found. Please install FFmpeg and add it to PATH.")
+    except FFmpegNotFoundError as e:
+        raise RuntimeError(str(e))
+    except FFmpegExecutionError as e:
+        raise RuntimeError(f"FFmpeg audio extraction failed: {e}")
 
     return output_path
 
@@ -113,18 +147,25 @@ def transcribe(
         cleanup_audio = True
 
     try:
-        # Determine compute type based on device
+        # Determine actual device (with GPU auto-detection)
         if device == "auto":
-            compute_type = "int8"  # Good balance of speed/quality
+            if _check_gpu_available():
+                actual_device = "cuda"
+                compute_type = "float16"
+            else:
+                actual_device = "cpu"
+                compute_type = "int8"
         elif device == "cuda":
-            compute_type = "float16"  # Best for GPU
+            actual_device = "cuda"
+            compute_type = "float16"
         else:
-            compute_type = "int8"  # CPU
+            actual_device = "cpu"
+            compute_type = "int8"
 
-        print(f"Loading Whisper model ({model_size})...")
+        print(f"Loading Whisper model ({model_size}) on {actual_device}...")
         model = WhisperModel(
             model_size,
-            device=device if device != "auto" else "cpu",
+            device=actual_device,
             compute_type=compute_type
         )
 
@@ -152,6 +193,17 @@ def transcribe(
         return segments
 
     finally:
+        # Cleanup Whisper model to release GPU memory
+        if 'model' in locals():
+            del model
+            # Clear CUDA cache if using GPU
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
+
         # Cleanup temporary audio file
         if cleanup_audio and os.path.exists(audio_path):
             os.remove(audio_path)

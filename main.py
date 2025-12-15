@@ -23,6 +23,19 @@ from datetime import datetime
 
 from tqdm import tqdm
 
+from logger import get_logger, init_logging
+from utils.input_validator import (
+    VIDEO_PATH_VALIDATOR,
+    OUTPUT_DIR_VALIDATOR,
+    WHISPER_MODEL_VALIDATOR,
+    PathValidator,
+    StringValidator,
+    sanitize_filename,
+)
+
+# Module logger
+logger = get_logger(__name__)
+
 # Import modules
 from transcriber import transcribe, get_full_transcript, TranscriptSegment
 from analyzer import analyze_transcript, get_screenshot_points
@@ -102,23 +115,57 @@ Examples:
 
 
 def validate_inputs(args) -> None:
-    """Validate command line inputs"""
-    # Check video file exists
-    video_path = Path(args.video)
-    if not video_path.exists():
-        print(f"Error: Video file not found: {args.video}")
+    """Validate command line inputs using secure validators."""
+    # Validate video path using secure PathValidator
+    # This prevents path traversal attacks, null bytes, and validates extension
+    video_result = VIDEO_PATH_VALIDATOR.validate(args.video)
+    if not video_result.is_valid:
+        logger.error(f"Video validation failed: {video_result.error_message}")
         sys.exit(1)
 
-    # Check supported video formats
-    supported_formats = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v'}
-    if video_path.suffix.lower() not in supported_formats:
-        print(f"Warning: Unsupported video format '{video_path.suffix}'. Attempting anyway...")
+    # Validate whisper model using ChoiceValidator
+    model_result = WHISPER_MODEL_VALIDATOR.validate(args.model)
+    if not model_result.is_valid:
+        logger.error(f"Model validation failed: {model_result.error_message}")
+        sys.exit(1)
+
+    # Validate output path if specified
+    if args.output:
+        # Validate output directory is accessible (create validator without must_exist)
+        output_result = OUTPUT_DIR_VALIDATOR.validate(str(Path(args.output).parent))
+        if not output_result.is_valid:
+            logger.error(f"Output path validation failed: {output_result.error_message}")
+            sys.exit(1)
+
+    # Validate temp directory if specified
+    if args.temp_dir:
+        temp_validator = PathValidator(
+            must_exist=True,
+            must_be_dir=True,
+            field_name="Temp directory"
+        )
+        temp_result = temp_validator.validate(args.temp_dir)
+        if not temp_result.is_valid:
+            logger.error(f"Temp directory validation failed: {temp_result.error_message}")
+            sys.exit(1)
+
+    # Validate language code if specified (basic string validation)
+    if args.language:
+        lang_validator = StringValidator(
+            min_length=2,
+            max_length=5,
+            pattern=r'^[a-z]{2,3}(-[A-Z]{2})?$',
+            field_name="Language code"
+        )
+        lang_result = lang_validator.validate(args.language)
+        if not lang_result.is_valid:
+            logger.error(f"Language validation failed: {lang_result.error_message}")
+            sys.exit(1)
 
     # Check API key (environment variable only for security)
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        print("Error: Anthropic API key required.")
-        print("Set ANTHROPIC_API_KEY environment variable.")
+        logger.error("Anthropic API key required. Set ANTHROPIC_API_KEY environment variable.")
         sys.exit(1)
 
 
@@ -128,7 +175,8 @@ def get_output_path(args, format_type: str) -> str:
         return args.output
 
     video_path = Path(args.video)
-    base_name = video_path.stem
+    # Sanitize filename to prevent path traversal attacks
+    base_name = sanitize_filename(video_path.stem)
 
     extension_map = {
         "docx": ".docx",
@@ -152,10 +200,12 @@ def main():
     """Main entry point"""
     args = parse_args()
 
-    print("=" * 60)
-    print("FrameNotes - AI-Powered Documentation Generator")
-    print("=" * 60)
-    print()
+    # Initialize logging based on verbose flag
+    init_logging(verbose=args.verbose)
+
+    logger.info("=" * 60)
+    logger.info("FrameNotes - AI-Powered Documentation Generator")
+    logger.info("=" * 60)
 
     # Validate inputs
     validate_inputs(args)
@@ -167,33 +217,33 @@ def main():
     temp_dir = args.temp_dir or tempfile.mkdtemp(prefix="framenotes_")
     screenshots_dir = Path(temp_dir) / "screenshots"
     screenshots_dir.mkdir(parents=True, exist_ok=True)
+    logger.debug(f"Using temp directory: {temp_dir}")
 
     try:
         # ===== Step 1: Get Video Info =====
-        print(f"[1/5] Analyzing video: {video_path.name}")
+        logger.info(f"[1/5] Analyzing video: {video_path.name}")
         duration = get_video_duration(str(video_path))
-        print(f"      Duration: {duration:.1f} seconds ({duration/60:.1f} minutes)")
-        print()
+        logger.info(f"      Duration: {duration:.1f} seconds ({duration/60:.1f} minutes)")
 
         # ===== Step 2: Transcribe =====
-        print(f"[2/5] Transcribing audio (model: {args.model})...")
+        logger.info(f"[2/5] Transcribing audio (model: {args.model})...")
         segments = transcribe(
             str(video_path),
             model_size=args.model,
             language=args.language
         )
-        print(f"      Transcribed {len(segments)} segments")
-        print()
+        logger.info(f"      Transcribed {len(segments)} segments")
 
         # ===== Step 3: Analyze with AI =====
-        print("[3/5] Analyzing transcript with Claude AI...")
+        logger.info("[3/5] Analyzing transcript with Claude AI...")
         analysis = analyze_transcript(segments, api_key=api_key)
-        print(f"      Title: {analysis.get('title', 'Untitled')}")
-        print(f"      Sections: {len(analysis.get('sections', []))}")
-        print()
+        # Security: Clear API key from memory immediately after use
+        del api_key
+        logger.info(f"      Title: {analysis.get('title', 'Untitled')}")
+        logger.info(f"      Sections: {len(analysis.get('sections', []))}")
 
         # ===== Step 4: Capture Screenshots =====
-        print("[4/5] Capturing screenshots...")
+        logger.info("[4/5] Capturing screenshots...")
         screenshot_points = get_screenshot_points(analysis)
         timestamps = [p.timestamp for p in screenshot_points]
 
@@ -211,14 +261,13 @@ def main():
             for ss in screenshot_list:
                 screenshots_map[ss.timestamp] = ss.filepath
 
-            print(f"      Captured {len(screenshots_map)} screenshots")
+            logger.info(f"      Captured {len(screenshots_map)} screenshots")
         else:
             screenshots_map = {}
-            print("      No screenshot points identified")
-        print()
+            logger.info("      No screenshot points identified")
 
         # ===== Step 5: Generate Documents =====
-        print("[5/5] Generating documentation...")
+        logger.info("[5/5] Generating documentation...")
 
         title = analysis.get("title", video_path.stem)
         summary = analysis.get("summary", "")
@@ -236,7 +285,7 @@ def main():
 
         for fmt in formats_to_generate:
             output_path = get_output_path(args, fmt)
-            print(f"      Generating {fmt.upper()}: {output_path}")
+            logger.info(f"      Generating {fmt.upper()}: {output_path}")
 
             if fmt == "docx":
                 generate_docx(
@@ -279,34 +328,31 @@ def main():
 
             generated_files.append(output_path)
 
-        print()
-        print("=" * 60)
-        print("COMPLETE!")
-        print("=" * 60)
-        print()
-        print("Generated files:")
+        logger.info("=" * 60)
+        logger.info("COMPLETE!")
+        logger.info("=" * 60)
+        logger.info("Generated files:")
         for f in generated_files:
-            print(f"  - {f}")
+            logger.info(f"  - {f}")
 
         if args.keep_screenshots:
-            print(f"\nScreenshots saved in: {screenshots_dir}")
+            logger.info(f"Screenshots saved in: {screenshots_dir}")
 
     except KeyboardInterrupt:
-        print("\n\nOperation cancelled by user.")
+        logger.warning("Operation cancelled by user.")
         sys.exit(1)
     except Exception as e:
-        print(f"\nError: {e}")
+        logger.error(f"Error: {e}")
         if args.verbose:
             import traceback
-            traceback.print_exc()
+            logger.error(traceback.format_exc())
         sys.exit(1)
     finally:
         # Cleanup temp files (always runs, even on error)
         if not args.keep_screenshots and not args.temp_dir:
             try:
                 shutil.rmtree(temp_dir, ignore_errors=True)
-                if args.verbose:
-                    print(f"Cleaned up temporary files in {temp_dir}")
+                logger.debug(f"Cleaned up temporary files in {temp_dir}")
             except Exception:
                 pass  # Ignore cleanup errors
 
